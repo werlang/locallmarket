@@ -7,8 +7,9 @@ import { router as systemRouter } from './routes/system.js';
 const app = express();
 const port = process.env.PORT || 3000;
 const host = '0.0.0.0';
+
 const apiClient = new ApiStreamClient({
-    url: process.env.API_WS_URL || 'ws://127.0.0.1:3000/ws/workers'
+    url: process.env.API_WS_URL
 });
 
 app.use(express.json());
@@ -28,7 +29,7 @@ app.use((req, res, next) => {
 app.use(errorMiddleware);
 
 app.listen(port, host, () => {
-    console.log(`API running on http://${host}:${port}`);
+    console.log(`WORKER running on http://${host}:${port}`);
 });
 
 export { app, apiClient };

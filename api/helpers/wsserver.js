@@ -6,10 +6,10 @@ import { WebSocket, WebSocketServer } from 'ws';
 export class WSServer {
 
     /**
-     * @param {{ server: import('node:http').Server, path?: string }} options
+     * @param {{ port: number, path?: string }} options
      */
-    constructor({ server, path = '/ws/workers' } = {}) {
-        this.ws = new WebSocketServer({ server, path });
+    constructor({ port = 3000, path = '/ws/workers' } = {}) {
+        this.ws = new WebSocketServer({ port, path });
         this.methodList = new Map();
         this.connectionCallback = null;
 

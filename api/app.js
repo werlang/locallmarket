@@ -1,4 +1,3 @@
-import http from 'node:http';
 import express from 'express';
 import { HttpError } from './helpers/error.js';
 import { StreamRouter } from './helpers/router.js';
@@ -10,11 +9,15 @@ const app = express();
 const port = process.env.PORT || 3000;
 const host = '0.0.0.0';
 
-const server = http.createServer(app);
+const wsPort = process.env.API_WS_PORT || 3000;
+const wsPath = process.env.WORKER_ROUTE || '/ws/workers';
+
 const workerSocketServer = new WSServer({
-    server,
-    path: process.env.WORKER_WS_PATH || '/ws/workers'
+    port: wsPort,
+    path: wsPath
 });
+console.log(`WebSocket server listening on ws://${host}:${wsPort}${wsPath}`);
+
 const streamRouter = new StreamRouter({ wsServer: workerSocketServer });
 
 /**
@@ -76,6 +79,7 @@ app.post('/stream', (req, res, next) => {
         stream = new HttpStream(res);
 
         const jobId = streamRouter.enqueue({ payload, stream });
+        console.log(`Enqueued job ${jobId} with model ${payload.model}`);
 
         res.once('close', () => {
             streamRouter.cancel(jobId);
@@ -97,8 +101,8 @@ app.use((req, res, next) => {
 
 app.use(errorMiddleware);
 
-server.listen(port, host, () => {
+app.listen(port, host, () => {
     console.log(`API running on http://${host}:${port}`);
 });
 
-export { app, server, streamRouter };
+export { app, streamRouter };
