@@ -1,0 +1,20 @@
+services:
+  api:
+    build: .
+    ports:
+      - 80:3000
+      - 3030:3030
+    env_file: .env
+    volumes:
+      - .:/app
+      - node_modules_api:/app/node_modules
+    restart: unless-stopped
+    networks:
+      - llm
+    command: npm start
+
+volumes:
+  node_modules_api:
+networks:
+  llm:
+    name: llm
