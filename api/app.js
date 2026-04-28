@@ -79,7 +79,6 @@ app.post('/stream', (req, res, next) => {
         stream = new HttpStream(res);
 
         const jobId = streamRouter.enqueue({ payload, stream });
-        console.log(`Enqueued job ${jobId} with model ${payload.model}`);
 
         res.once('close', () => {
             streamRouter.cancel(jobId);

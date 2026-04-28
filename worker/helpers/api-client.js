@@ -168,12 +168,14 @@ export class ApiStreamClient {
         const stream = new SocketStream(this, jobSocket, jobId);
 
         try {
+            console.log(`[${new Date().toISOString()}] Received job ${jobId}. Forwarding to model runner at ${request.host || process.env.MODEL_RUNNER_HOST}...`);
             const llm = new LLM({
                 model: request.model,
                 host: request.host || process.env.MODEL_RUNNER_HOST
             });
 
             await llm.streamOutput(request.message, stream);
+            console.log(`[${new Date().toISOString()}] Completed job ${jobId}.`);
             this.sendToSocket(jobSocket, 'job-complete', { jobId });
         } catch (error) {
             const message = error?.message || 'Failed to process stream job.';

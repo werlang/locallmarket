@@ -42,6 +42,7 @@ export class StreamRouter {
             }
 
             this.finishJob(payload?.jobId, { workerId: worker.id });
+            console.log(`[${new Date().toISOString()}] Worker ${worker.id} completed job ${payload?.jobId}.`);
         });
 
         this.wsServer.on('job-failed', (ws, payload) => {
@@ -142,6 +143,7 @@ export class StreamRouter {
             available: false,
             jobId: null
         });
+        console.log(`[${new Date().toISOString()}] Registered worker ${requestedId}.`);
 
         this.requestWorkerReady(ws);
     }
@@ -252,6 +254,7 @@ export class StreamRouter {
             this.activeJobs.set(job.id, job);
 
             try {
+                console.log(`[${new Date().toISOString()}] Dispatching job ${job.id} to worker ${worker.id}...`);
                 this.wsServer.send(worker.ws, 'stream-job', {
                     jobId: job.id,
                     payload: job.payload
