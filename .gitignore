@@ -1,0 +1,5 @@
+node_modules
+.github/references
+.env
+.DS_Store
+.agents
