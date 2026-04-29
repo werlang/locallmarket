@@ -100,8 +100,8 @@ app.use((req, res, next) => {
 
 app.use(errorMiddleware);
 
-app.listen(port, host, () => {
+const server = app.listen(port, host, () => {
     console.log(`API running on http://${host}:${port}`);
 });
 
-export { app, streamRouter };
+export { app, server, streamRouter };

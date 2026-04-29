@@ -4,7 +4,10 @@
   "description": "",
   "type": "module",
   "scripts": {
-    "start": "node --inspect=0.0.0.0 --watch app.js"
+    "start": "node --inspect=0.0.0.0 --watch app.js",
+    "test": "node --test --test-reporter=spec 'test/**/*.mjs'",
+    "test:unit": "node --test --test-reporter=spec 'test/unit/**/*.mjs'",
+    "test:integration": "node --test --test-reporter=spec 'test/integration/**/*.mjs'"
   },
   "dependencies": {
     "express": "^4.21.2",

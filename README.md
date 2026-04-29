@@ -13,7 +13,7 @@ The shipped runtime is intentionally narrow:
 
 | Service | Folder | Host Port | Responsibility |
 | --- | --- | --- | --- |
-| `api` | `api/` | `3000` | Client-facing `GET /ready`, `POST /stream`, queueing, SSE relay, worker WebSocket server |
+| `api` | `api/` | `80` | Client-facing `GET /ready`, `POST /stream`, queueing, SSE relay, worker WebSocket server |
 | `worker` | `worker/` | not published by compose | Outbound WebSocket client that executes model streams and returns chunk events |
 
 ## Runtime Flow
@@ -79,6 +79,9 @@ Compatibility note: the API still tolerates `input` as an alias internally, but 
 ```text
 api/
   app.js                 # API entrypoint and worker WebSocket server
+  compose.yaml           # API compose file (host port 80 → container 3000)
+  Dockerfile
+  package.json
   helpers/
     error.js             # HTTP-safe error types
     queue.js             # FIFO queue for pending stream jobs
@@ -87,9 +90,15 @@ api/
     wsserver.js          # Typed WebSocket server for worker messages
   middleware/
     error.js             # JSON error envelope middleware
+  test/
+    unit/
+    integration/
 
 worker/
   app.js                 # Worker entrypoint and outbound API WebSocket client
+  compose.dev.yaml       # Worker development compose file (no exposed ports)
+  Dockerfile
+  package.json
   helpers/
     api-client.js        # Worker socket lifecycle and job relay
     error.js             # Worker-side HTTP/model error types
@@ -99,18 +108,12 @@ worker/
     llm.js               # Model runner SSE parser used by stream jobs
   routes/
     system.js            # Local worker `/ready` endpoint for process checks
-  start-compose.sh       # Compose startup script that refreshes mounted deps
   test/
     integration/
       stream-api.test.mjs
     unit/
       llm.test.mjs
       stream-router-reconnect.test.mjs
-
-web/
-  index.html             # Stream-only sandbox UI
-
-compose.yaml             # API + worker compose stack, API exposed on 3000
 ```
 
 ## Running Locally
@@ -118,11 +121,12 @@ compose.yaml             # API + worker compose stack, API exposed on 3000
 ### Docker Compose
 
 ```sh
-docker compose up -d --build api worker
-curl -sS http://127.0.0.1:3000/ready
+docker compose -f api/compose.yaml up -d --build api
+docker compose -f worker/compose.dev.yaml up -d --build worker
+curl -sS http://127.0.0.1/ready
 ```
 
-The compose stack publishes the API on `127.0.0.1:3000` and keeps workers internal to the compose network.
+The API compose file publishes the API on `127.0.0.1:80` and the worker compose file keeps workers internal to the `llm` compose network.
 
 ### API Standalone
 
@@ -145,16 +149,6 @@ node app.js
 
 When running both processes locally, choose different `PORT` values so the worker's local health server does not collide with the API.
 
-### Sandbox UI
-
-Serve the `web/` directory with any static file server and point it at the API base URL.
-
-```sh
-python3 -m http.server 4173 --directory web
-```
-
-Then open `http://127.0.0.1:4173` in the browser.
-
 ## Environment Variables
 
 ### API
@@ -162,7 +156,8 @@ Then open `http://127.0.0.1:4173` in the browser.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `PORT` | `3000` | API listen port |
-| `WORKER_WS_PATH` | `/ws/workers` | WebSocket path used by workers to register and receive jobs |
+| `API_WS_PORT` | `3000` | Port for the WebSocket server that workers connect to |
+| `WORKER_ROUTE` | `/ws/workers` | WebSocket path used by workers to register and receive jobs |
 | `NODE_ENV` | unset | Controls whether error payloads include debug data |
 
 ### Worker
@@ -175,14 +170,32 @@ Then open `http://127.0.0.1:4173` in the browser.
 | `MODEL_RUNNER_MODEL` | unset | Default model name when a request does not override it |
 | `NODE_ENV` | unset | Controls whether worker error payloads include debug data |
 
-## Tests
+## Running Tests
+
+### Worker
 
 ```sh
-cd worker
-npm install
-npm test
-npm run test:unit
-npm run test:integration
+cd worker && npm test
+```
+
+Unit-only or integration-only:
+
+```sh
+cd worker && npm run test:unit
+cd worker && npm run test:integration
+```
+
+### API
+
+```sh
+cd api && npm test
+```
+
+Unit-only or integration-only:
+
+```sh
+cd api && npm run test:unit
+cd api && npm run test:integration
 ```
 
 The active suite covers the worker reconnect guardrails, the live LLM stream parser, and the end-to-end API queue plus WebSocket relay flow.
