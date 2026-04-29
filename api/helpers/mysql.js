@@ -1,6 +1,5 @@
 import mysql from 'mysql2/promise';
 import { CustomError } from './error.js';
-import mysqldump from 'mysqldump';
 
 export class Mysql {
         

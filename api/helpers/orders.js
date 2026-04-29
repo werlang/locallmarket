@@ -353,7 +353,7 @@ export async function applyOrderUseStream({ req, res, next, orderIdRaw, ordersMo
 
 /**
  * Legacy /stream compatibility flow.
- * Keeps the pre-orderbook behavior by enqueuing untargeted model-based jobs.
+ * Keeps the pre-orderbook behavior by enqueuing a non-targeted job with the provided model, without an explicit consume step.
  * @param {{
  *   req: import('express').Request,
  *   res: import('express').Response,

@@ -1,6 +1,5 @@
 import { HttpError } from '../helpers/error.js';
 import { Mysql } from '../helpers/mysql.js';
-import { streamRouter } from '../helpers/runtime.js';
 
 /**
  * Orderbook business rules: owner scoping, worker-connectivity checks, and public filtering.
@@ -10,7 +9,7 @@ export class OrdersModel {
     /**
      * @param {{ streamRouter?: import('../helpers/router.js').StreamRouter }} options
      */
-    constructor({ streamRouter: runtimeStreamRouter = streamRouter } = {}) {
+    constructor({ streamRouter: runtimeStreamRouter } = {}) {
         this.streamRouter = runtimeStreamRouter;
     }
 

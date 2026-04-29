@@ -6,7 +6,7 @@ import { sendSuccess } from './helpers/response.js';
 import { errorMiddleware } from './middleware/error.js';
 import { router as usersRouter } from './routes/users.js';
 import { router as ordersRouter } from './routes/orders.js';
-import { router as streamRoutesRouter } from './routes/stream.js';
+import { router as modelsRouter } from './routes/models.js';
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -19,7 +19,7 @@ const wsPath = process.env.WORKER_ROUTE || '/ws/workers';
 const workerSocketServer = new WSServer({ port: wsPort, path: wsPath });
 console.log(`WebSocket server listening on ws://${wsHost}:${wsPort}${wsPath}`);
 
-export const streamRouter = new StreamRouter({
+const streamRouter = new StreamRouter({
     wsServer: workerSocketServer
 });
 
@@ -46,9 +46,9 @@ app.get('/ready', (req, res) => {
     });
 });
 
-app.use(streamRoutesRouter);
-app.use(usersRouter);
-app.use(ordersRouter);
+app.use('/models', modelsRouter);
+app.use('/users', usersRouter);
+app.use('/orders', ordersRouter);
 
 app.use((req, res, next) => {
     next(new HttpError(404, 'I am sorry, but I think you are lost.'));
