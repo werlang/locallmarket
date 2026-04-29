@@ -61,15 +61,20 @@ export class StreamRouter {
 
     /**
      * Adds a client stream request to the shared API queue.
-     * @param {{ payload: { message: string, model: string, host?: string }, stream: import('./stream.js').Stream }} job
+     * @param {{ payload: { message: string, model: string }, stream: import('./stream.js').Stream, targetWorkerId?: string, onJobAborted?: () => void }} job
      * @returns {string}
      */
     enqueue(job) {
+        const normalizedTargetWorkerId = typeof job.targetWorkerId === 'string' && job.targetWorkerId.trim().length > 0
+            ? job.targetWorkerId.trim()
+            : null;
         const queuedJob = {
             ...job,
             disconnected: false,
             errorSent: false,
-            workerId: null
+            workerId: null,
+            targetWorkerId: normalizedTargetWorkerId,
+            onJobAborted: typeof job.onJobAborted === 'function' ? job.onJobAborted : null
         };
 
         const jobId = this.queue.add(queuedJob);
@@ -118,6 +123,33 @@ export class StreamRouter {
             activeJobs: this.activeJobs.size,
             queuedJobs: this.queue.getSize()
         };
+    }
+
+    /**
+     * Checks whether a worker is currently connected to the API websocket.
+     * @param {string} workerId
+     * @returns {boolean}
+     */
+    isWorkerConnected(workerId) {
+        if (typeof workerId !== 'string' || workerId.trim().length === 0) {
+            return false;
+        }
+
+        return this.workers.has(workerId.trim());
+    }
+
+    /**
+     * Checks whether a worker is connected and currently marked as available.
+     * @param {string} workerId
+     * @returns {boolean}
+     */
+    isWorkerAvailable(workerId) {
+        if (typeof workerId !== 'string' || workerId.trim().length === 0) {
+            return false;
+        }
+
+        const worker = this.workers.get(workerId.trim());
+        return Boolean(worker && worker.available && !worker.jobId);
     }
 
     /**
@@ -201,6 +233,7 @@ export class StreamRouter {
 
     /**
      * Clears worker state when its socket disconnects mid-flight.
+     * Also aborts any queued (not yet dispatched) jobs targeting that worker.
      * @param {import('ws').WebSocket & { workerId?: string, activeJobId?: string | null }} ws
      */
     handleWorkerDisconnect(ws) {
@@ -225,6 +258,22 @@ export class StreamRouter {
                 errorMessage: 'Worker disconnected while streaming the request.'
             });
         }
+
+        // Abort any queued jobs that were waiting specifically for this worker.
+        // These jobs have not been dispatched yet, so we must compensate before discarding.
+        const snapshot = Array.isArray(this.queue.queue) ? [...this.queue.queue] : [];
+        for (const entry of snapshot) {
+            if (entry.targetWorkerId === workerId) {
+                this.queue.remove(entry.id);
+                if (typeof entry.onJobAborted === 'function') {
+                    try {
+                        entry.onJobAborted();
+                    } catch (error) {
+                        console.error('[StreamRouter] onJobAborted callback failed:', error);
+                    }
+                }
+            }
+        }
     }
 
     /**
@@ -232,14 +281,25 @@ export class StreamRouter {
      */
     dispatch() {
         while (this.queue.getSize() > 0) {
-            const worker = this.getFirstAvailableWorker();
+            const queuedEntries = Array.isArray(this.queue.queue) ? this.queue.queue : [];
+            let job = null;
+            let worker = null;
 
-            if (!worker) {
-                return;
+            for (const queuedEntry of queuedEntries) {
+                const candidateWorker = queuedEntry.targetWorkerId
+                    ? this.getAvailableWorkerById(queuedEntry.targetWorkerId)
+                    : this.getFirstAvailableWorker();
+
+                if (!candidateWorker) {
+                    continue;
+                }
+
+                job = this.queue.remove(queuedEntry.id);
+                worker = candidateWorker;
+                break;
             }
 
-            const job = this.queue.shift();
-            if (!job) {
+            if (!job || !worker) {
                 return;
             }
 
@@ -316,6 +376,21 @@ export class StreamRouter {
         }
 
         return null;
+    }
+
+    /**
+     * Returns a specific worker when it is connected and currently available.
+     * @param {string} workerId
+     * @returns {{ id: string, ws: import('ws').WebSocket, available: boolean, jobId: string | null } | null}
+     */
+    getAvailableWorkerById(workerId) {
+        const worker = this.workers.get(workerId);
+
+        if (!worker || !worker.available || worker.jobId) {
+            return null;
+        }
+
+        return worker;
     }
 
     /**

@@ -1,51 +1,27 @@
 import express from 'express';
 import { HttpError } from './helpers/error.js';
+import { WSServer } from './helpers/wsServer.js';
 import { StreamRouter } from './helpers/router.js';
-import { HttpStream } from './helpers/stream.js';
-import { WSServer } from './helpers/wsserver.js';
+import { sendSuccess } from './helpers/response.js';
 import { errorMiddleware } from './middleware/error.js';
+import { router as usersRouter } from './routes/users.js';
+import { router as ordersRouter } from './routes/orders.js';
+import { router as streamRoutesRouter } from './routes/stream.js';
 
 const app = express();
 const port = process.env.PORT || 3000;
 const host = '0.0.0.0';
 
-const wsPort = process.env.API_WS_PORT || 3000;
+const wsHost = '0.0.0.0';
+const wsPort = Number(process.env.API_WS_PORT || 3000);
 const wsPath = process.env.WORKER_ROUTE || '/ws/workers';
 
-const workerSocketServer = new WSServer({
-    port: wsPort,
-    path: wsPath
+const workerSocketServer = new WSServer({ port: wsPort, path: wsPath });
+console.log(`WebSocket server listening on ws://${wsHost}:${wsPort}${wsPath}`);
+
+export const streamRouter = new StreamRouter({
+    wsServer: workerSocketServer
 });
-console.log(`WebSocket server listening on ws://${host}:${wsPort}${wsPath}`);
-
-const streamRouter = new StreamRouter({ wsServer: workerSocketServer });
-
-/**
- * Validate and normalize the client stream payload.
- * @param {any} body
- * @returns {{ message: string, model: string, host: string | undefined }}
- */
-function parseStreamBody(body) {
-    const payload = body || {};
-    const message = typeof payload.message === 'string' && payload.message.trim().length > 0
-        ? payload.message.trim()
-        : (typeof payload.input === 'string' && payload.input.trim().length > 0
-            ? payload.input.trim()
-            : null);
-
-    if (!message) {
-        throw new HttpError(400, 'message must be a non-empty string.');
-    }
-
-    if (typeof payload.model !== 'string' || payload.model.trim().length === 0) {
-        throw new HttpError(400, 'model is required in the request body.');
-    }
-
-    return {
-        message,
-        model: payload.model.trim(),
-    };
-}
 
 /**
  * Summarize API readiness and worker capacity for health checks.
@@ -65,34 +41,14 @@ app.use(express.urlencoded({ extended: true }));
  * Health endpoint for local smoke tests and container readiness checks.
  */
 app.get('/ready', (req, res) => {
-    res.status(200).json(buildReadyPayload());
+    sendSuccess(res, {
+        body: buildReadyPayload()
+    });
 });
 
-/**
- * Accepts a stream request, queues it, and relays worker chunks as SSE.
- */
-app.post('/stream', (req, res, next) => {
-    let stream;
-
-    try {
-        const payload = parseStreamBody(req.body);
-        stream = new HttpStream(res);
-
-        const jobId = streamRouter.enqueue({ payload, stream });
-
-        res.once('close', () => {
-            streamRouter.cancel(jobId);
-        });
-    } catch (error) {
-        if (res.headersSent) {
-            stream?.event('error').send(JSON.stringify({ error: error?.message || 'Invalid request.' }));
-            stream?.close();
-            return;
-        }
-
-        next(error);
-    }
-});
+app.use(streamRoutesRouter);
+app.use(usersRouter);
+app.use(ordersRouter);
 
 app.use((req, res, next) => {
     next(new HttpError(404, 'I am sorry, but I think you are lost.'));
