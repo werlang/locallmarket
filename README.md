@@ -1,13 +1,14 @@
-# Stream Router
+# Orderbook
 
-Queued LLM streaming over an API-owned SSE endpoint and worker-side WebSocket delivery.
+Marketplace where API users register workers as rentable orderbook entries and consumers purchase streamed LLM access with per-order credit deduction.
 
-The shipped runtime is intentionally narrow:
+Core design constraints:
 
-- Clients call `POST /stream` on the API.
-- The API queues requests, assigns each job to the first available worker, and relays streamed chunks back over SSE.
-- Workers connect outbound to the API over WebSocket and do not expose the client-facing stream endpoint.
+- Workers connect outbound to the API over WebSocket; the API owns all client-facing routes.
+- API HTTP composition is intentionally thin: `api/app.js` wires middleware/startup and mounts resource routers from `api/routes/`.
+- SQL is confined to `api/drivers/mysql/` only. No SQL appears in models, helpers, routes, or middleware.
 - `GET /ready` on the API reports worker capacity and queue depth.
+- MySQL bootstrap is opt-in and gated by `MYSQL_ENABLED=true`.
 
 ## Services
 
@@ -15,19 +16,38 @@ The shipped runtime is intentionally narrow:
 | --- | --- | --- | --- |
 | `api` | `api/` | `80` | Client-facing `GET /ready`, `POST /stream`, queueing, SSE relay, worker WebSocket server |
 | `worker` | `worker/` | not published by compose | Outbound WebSocket client that executes model streams and returns chunk events |
+| MySQL | external | `3306` | Persistent store for users and orders; required when `MYSQL_ENABLED=true` |
 
 ## Runtime Flow
 
-1. A client sends `POST /stream` with `message` and `model` to the API.
-2. The API opens an SSE response immediately, enqueues the job, and waits for the first available worker.
-3. A worker receives the job over `ws://.../ws/workers`, calls the configured model runner, and emits `message`, `end`, or `error` events back over WebSocket.
-4. The API relays those events to the original HTTP client and updates `/ready` counts as jobs start and drain.
+### Order Creation and Consumer Flow
+
+1. A provider registers a user account via `POST /users`.
+2. The provider connects a worker to the API WebSocket (`ws://.../ws/workers`).
+3. With the worker connected, the provider creates an orderbook entry via `POST /order` specifying `workerId`, `model`, `price`, and `tps`.
+4. A consumer registers their own user account and recharges credits via `POST /users/:externalId/recharge`.
+5. The consumer browses available orders via `GET /orders` (with optional model/price/tps/availability filters).
+6. The consumer calls `POST /workers/:orderid/use` supplying the request `message`. The API:
+   - Validates the order is available and the target worker is connected.
+   - Atomically marks the order as consumed and deducts credits from the consumer's account.
+   - Opens an SSE response immediately and dispatches the job to the reserved worker.
+   - Relays `message`, `end`, and `error` events back to the consumer over SSE.
+   - If the targeted worker disconnects while the job is still queued, the order and credits are automatically refunded via a compensating transaction.
+
+### Legacy Compatibility
+
+`POST /stream` supports two compatibility modes:
+
+- Legacy mode: no `orderId` in body, requires `{ "model", "message" }`, and enqueues a model-based untargeted stream job.
+- Order-consume mode: body includes `orderId`, then behavior matches `POST /workers/:orderid/use` (consume order, debit credits, targeted worker dispatch).
+
+New consumers should use `POST /workers/:orderid/use`.
 
 ## API Contract
 
 ### `GET /ready`
 
-Returns the current API queue and worker state.
+Returns current API queue depth and worker capacity.
 
 ```json
 {
@@ -39,40 +59,156 @@ Returns the current API queue and worker state.
 }
 ```
 
-### `POST /stream`
+---
 
-Streams model output back to the client with Server-Sent Events.
+### Users
 
-- Request body: `{ "message": string, "model": string, "host"?: string }`
-- `message` is the documented user prompt field.
-- `model` is required for each request.
-- `host` is an optional per-request model runner override for local testing.
+#### `POST /users`
+
+Registers a new user account.
+
+- Request body: `{ "externalId": string, "name"?: string, "email"?: string }`
+- Response `201`: `{ "ok": true, "user": { id, externalId, name, email, credits, createdAt, updatedAt } }`
+
+#### `GET /users`
+
+Lists all registered users with optional pagination.
+
+- Query params: `limit` (default 50, max 100), `offset` (default 0)
+- Response `200`: `{ "ok": true, "users": [...] }`
+
+#### `GET /users/:externalId`
+
+Returns a single user profile.
+
+- Response `200`: `{ "ok": true, "user": {...} }` or `404` if not found.
+
+#### `PUT /users/:externalId`
+
+Updates mutable user fields (`name`, `email`).
+
+- Request body: `{ "name"?: string, "email"?: string }`
+- Response `200`: `{ "ok": true, "user": {...} }`
+
+#### `POST /users/:externalId/recharge`
+
+Adds credits to a user account.
+
+- Request body: `{ "amount": number }` (must be positive)
+- Response `200`: `{ "ok": true, "user": {...} }`
+
+#### `DELETE /users/:externalId`
+
+Deletes a user account and cascades to owned orders.
+
+- Response `200`: `{ "ok": true }`
+
+---
+
+### Orderbook
+
+Owner/consumer identity is passed as the `x-user-external-id` header on owner-scoped and consume routes.
+
+#### `POST /order`
+
+Creates a new orderbook entry. Requires the specified worker to be currently connected.
+
+- Header: `x-user-external-id: <externalId>`
+- Request body: `{ "workerId": string, "model": string, "price": number, "tps": number }`
+- Response `201`: `{ "ok": true, "order": { id, workerId, model, price, tps, isAvailable, isConsumed, createdAt } }`
+- Returns `422` if the worker is not connected; `400` on invalid payload.
+
+#### `GET /orders`
+
+Public listing of orderbook entries with optional filters.
+
+- Query params: `model`, `minPrice`, `maxPrice`, `minTps`, `maxTps`, `onlyAvailable` (boolean)
+- Response `200`: `{ "ok": true, "orders": [...] }` — runtime `isAvailable` overlays live worker connectivity state.
+
+#### `GET /order/:orderId`
+
+Returns a single owner-scoped order.
+
+- Header: `x-user-external-id: <externalId>`
+- Response `200`: `{ "ok": true, "order": {...} }` or `403`/`404` on mismatch.
+
+#### `PUT /order/:orderId`
+
+Updates an owner-scoped order (`model`, `price`, `tps`).
+
+- Header: `x-user-external-id: <externalId>`
+- Request body: `{ "model"?: string, "price"?: number, "tps"?: number }`
+- Response `200`: `{ "ok": true, "order": {...} }`
+
+#### `DELETE /order/:orderId`
+
+Deletes an owner-scoped order.
+
+- Header: `x-user-external-id: <externalId>`
+- Response `200`: `{ "ok": true }`
+
+---
+
+### Worker Use (Consume)
+
+#### `POST /workers/:orderid/use`
+
+Consumes an order and streams the worker's model response to the caller via Server-Sent Events.
+
+- Header: `x-user-external-id: <consumerExternalId>`
+- Request body: `{ "message": string }` (or `{ "input": string }` compatibility alias)
+- The API atomically marks the order as consumed and deducts the order `price` from the consumer's credits before streaming begins.
+- If the target worker disconnects while the job is still queued, the consumption is reversed and credits are refunded automatically.
+- Returns `400` if the order is not found or already consumed; `402` if the consumer has insufficient credits; `503` if the target worker is unavailable.
 
 Example request:
 
 ```sh
 curl --max-time 45 -sS -N \
-  -X POST http://127.0.0.1:3000/stream \
+  -X POST http://127.0.0.1:3000/workers/42/use \
   -H 'content-type: application/json' \
-  --data '{"message":"Reply with OK only.","model":"ai/smollm2:135M-Q2_K"}'
+  -H 'x-user-external-id: user-abc' \
+  --data '{"message":"Reply with OK only."}'
 ```
 
-Example stream:
+Example SSE stream:
 
 ```text
 event: message
-data: Echo: 
-
-event: message
-data: Reply with OK only.
+data: OK
 
 event: end
 data: Stream complete.
 ```
 
-Validation failures return the standard JSON error envelope before SSE starts.
+#### `POST /stream` (legacy)
 
-Compatibility note: the API still tolerates `input` as an alias internally, but new clients should send `message`.
+Compatibility endpoint with dual behavior:
+
+- Legacy mode (no `orderId`): parses `{ "model": string, "message": string }` and enqueues a non-targeted model stream.
+- Order-consume mode (with `orderId`): behaves like `POST /workers/:orderid/use`.
+
+- Request body (legacy mode): `{ "model": string, "message": string }`
+- Request body (order-consume mode): `{ "orderId": string|number, "message": string }`
+- New consumers should use `POST /workers/:orderid/use` instead.
+
+---
+
+## Architecture Conventions
+
+### SQL Confinement
+
+**All SQL lives exclusively in `api/drivers/mysql/`.**
+
+Models, helpers, routes, and middleware must not contain SQL. They interact with the database only through the public methods exported by the MySQL drivers (`api/drivers/mysql/users.js`, `api/drivers/mysql/orders.js`). This is enforced by convention and validated by the CI scan in the worker logs.
+
+### MySQL Bootstrap
+
+MySQL is opt-in. When `MYSQL_ENABLED=false` (the default), the API starts without a database and all user/order routes return `503`. Set `MYSQL_ENABLED=true` and provide connection env vars to enable persistence.
+
+Schema is bootstrapped automatically on startup via `CREATE TABLE IF NOT EXISTS`. No manual migration step is required for a fresh deployment.
+
+---
 
 ## Repository Layout
 
@@ -83,16 +219,31 @@ api/
   Dockerfile
   package.json
   helpers/
-    error.js             # HTTP-safe error types
+    error.js             # HttpError: HTTP-safe error type
+    orders.js            # Order parse/validate helpers; applyOrderUseStream SSE handler
     queue.js             # FIFO queue for pending stream jobs
-    router.js            # Worker registration, dispatch, and job lifecycle
-    stream.js            # SSE response wrapper
-    wsserver.js          # Typed WebSocket server for worker messages
+    router.js            # StreamRouter: worker registration, targeted dispatch, job lifecycle
+    stream.js            # HttpStream: SSE response wrapper
+    users.js             # User parse/validate helpers
+    wsserver.js          # WSServer: typed WebSocket server for worker messages
   middleware/
     error.js             # JSON error envelope middleware
+  models/
+    orders.js            # OrdersModel: orderbook business logic over drivers
+    users.js             # UsersModel: user business logic over UsersDriver
+  routes/
+    orders.js            # /order and /orders resource handlers
+    stream.js            # /stream and /workers/:orderid/use handlers
+    users.js             # /users resource handlers
   test/
-    unit/
-    integration/
+    helpers/
+      orders.test.mjs    # Parse/validate helpers + applyOrderUseStream route tests
+      router.test.mjs    # StreamRouter targeted dispatch and session-safety tests
+      users.test.mjs     # User parse/validate helper tests
+    models/
+      orders.test.mjs    # OrdersModel business logic + unconsumForUse tests
+      users.test.mjs     # UsersModel business logic tests
+  compose.yaml           # API compose stack; publishes API on host port 80
 
 worker/
   app.js                 # Worker entrypoint and outbound API WebSocket client
@@ -108,17 +259,14 @@ worker/
     llm.js               # Model runner SSE parser used by stream jobs
   routes/
     system.js            # Local worker `/ready` endpoint for process checks
-  test/
-    integration/
-      stream-api.test.mjs
-    unit/
-      llm.test.mjs
-      stream-router-reconnect.test.mjs
+  compose.dev.yaml       # Worker dev compose stack
 ```
+
+---
 
 ## Running Locally
 
-### Docker Compose
+### Docker Compose (with MySQL)
 
 ```sh
 docker compose -f api/compose.yaml up -d --build api
@@ -133,7 +281,16 @@ The API compose file publishes the API on `127.0.0.1:80` and the worker compose 
 ```sh
 cd api
 npm install
+# Without MySQL (streaming infra only):
 PORT=3300 node app.js
+# With MySQL:
+PORT=3300 \
+MYSQL_ENABLED=true \
+MYSQL_HOST=127.0.0.1 \
+MYSQL_USER=root \
+MYSQL_PASSWORD=secret \
+MYSQL_DATABASE=orderbook \
+node app.js
 ```
 
 ### Worker Standalone
@@ -147,7 +304,9 @@ MODEL_RUNNER_HOST=http://127.0.0.1:3900 \
 node app.js
 ```
 
-When running both processes locally, choose different `PORT` values so the worker's local health server does not collide with the API.
+Choose different `PORT` values so the worker's local health server does not collide with the API.
+
+---
 
 ## Environment Variables
 
@@ -164,11 +323,13 @@ When running both processes locally, choose different `PORT` values so the worke
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `PORT` | `3000` | Local worker HTTP port for `/ready` only |
+| `PORT` | `3000` | Local worker HTTP port for `/ready` health check |
 | `API_WS_URL` | `ws://127.0.0.1:3000/ws/workers` | Outbound WebSocket URL for API registration |
 | `MODEL_RUNNER_HOST` | unset | Base URL for the model runner SSE API |
-| `MODEL_RUNNER_MODEL` | unset | Default model name when a request does not override it |
+| `MODEL_RUNNER_MODEL` | unset | Default model name when a request does not supply one |
 | `NODE_ENV` | unset | Controls whether worker error payloads include debug data |
+
+---
 
 ## Running Tests
 
@@ -198,5 +359,5 @@ cd api && npm run test:unit
 cd api && npm run test:integration
 ```
 
-The active suite covers the worker reconnect guardrails, the live LLM stream parser, and the end-to-end API queue plus WebSocket relay flow.
+The API suite covers: user parse/validate helpers, user model business logic, order parse/validate helpers, `applyOrderUseStream` and legacy `applyLegacyStream` behavior, route-level stream dispatch, `StreamRouter` targeted dispatch and session-safety, MySQL driver public method surface and SQL confinement, and `OrdersModel` consume/unconsume status mapping. All tests pass (72 as of the last verified run; count grows with each feature addition).
 
