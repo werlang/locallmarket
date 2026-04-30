@@ -43,6 +43,8 @@ export class StreamRouter {
                 return;
             }
 
+            this.persistWorkerTpsFromCompletion(worker, payload?.jobId, payload?.usage);
+
             const settlement = this.settleCompletedJobIfNeeded(payload?.jobId, {
                 workerId: worker.id,
                 workerOwnerId: worker.ownerId,
@@ -153,6 +155,34 @@ export class StreamRouter {
             activeJobs: this.activeJobs.size,
             queuedJobs: this.queue.getSize()
         };
+    }
+
+    /**
+     * Returns runtime worker state snapshots, optionally scoped to one owner.
+     * @param {{ ownerId?: string }} [options]
+     * @returns {Array<{ id: string, ownerId: string | null, connected: boolean, available: boolean, activeJobId: string | null }>}
+     */
+    getWorkersSnapshot({ ownerId } = {}) {
+        const normalizedOwnerId = typeof ownerId === 'string' && ownerId.trim().length > 0
+            ? ownerId.trim()
+            : null;
+        const snapshots = [];
+
+        for (const worker of this.workers.values()) {
+            if (normalizedOwnerId && worker.ownerId !== normalizedOwnerId) {
+                continue;
+            }
+
+            snapshots.push({
+                id: worker.id,
+                ownerId: worker.ownerId,
+                connected: true,
+                available: Boolean(worker.available && !worker.jobId),
+                activeJobId: typeof worker.jobId === 'string' ? worker.jobId : null
+            });
+        }
+
+        return snapshots;
     }
 
     /**
@@ -394,6 +424,7 @@ export class StreamRouter {
             worker.jobId = job.id;
             worker.ws.activeJobId = job.id;
             job.workerId = worker.id;
+            job.startedAtMs = Date.now();
             this.activeJobs.set(job.id, job);
 
             try {
@@ -560,5 +591,47 @@ export class StreamRouter {
                 usage
             })
             .then(() => undefined);
+    }
+
+    /**
+     * Persists an observed worker TPS after successful completion of the active job.
+     * Stale or malformed completion events are ignored to avoid corrupting persisted metrics.
+     *
+     * @param {{ id: string, jobId: string | null }} worker
+     * @param {string | undefined} jobId
+     * @param {unknown} usage
+     */
+    persistWorkerTpsFromCompletion(worker, jobId, usage) {
+        if (!this.workersModel || typeof this.workersModel.updatePerformanceTps !== 'function') {
+            return;
+        }
+
+        if (typeof jobId !== 'string' || jobId !== worker.jobId) {
+            return;
+        }
+
+        const job = this.activeJobs.get(jobId);
+        const model = typeof job?.payload?.model === 'string' && job.payload.model.trim().length > 0
+            ? job.payload.model.trim()
+            : null;
+
+        if (!job || !model || !Number.isFinite(job.startedAtMs) || job.startedAtMs < 1) {
+            return;
+        }
+
+        this.workersModel
+            .updatePerformanceTps({
+                workerId: worker.id,
+                model,
+                usage,
+                startedAtMs: job.startedAtMs,
+                completedAtMs: Date.now()
+            })
+            .catch((error) => {
+                console.error(
+                    `[${new Date().toISOString()}] Failed to persist TPS for worker ${worker.id} on job ${jobId}:`,
+                    error?.message || error
+                );
+            });
     }
 }

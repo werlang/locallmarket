@@ -182,3 +182,121 @@ test('targeted job without onJobAborted does not error on worker disconnect', ()
     assert.doesNotThrow(() => ws._emit('close'));
     assert.equal(router.queue.getSize(), 0);
 });
+
+test('job-complete persists observed worker TPS using completion usage and elapsed job time', async () => {
+    const wsServer = makeMockWsServer();
+    const updateCalls = [];
+    const originalNow = Date.now;
+
+    const router = new StreamRouter({
+        wsServer,
+        workersModel: {
+            async bindConnectedWorker({ workerId }) {
+                return {
+                    worker: { id: workerId, userId: 'owner-1' },
+                    user: { id: 'owner-1' }
+                };
+            },
+            async markDisconnected() {
+                return undefined;
+            },
+            async updatePerformanceTps(input) {
+                updateCalls.push(input);
+                return 30;
+            }
+        }
+    });
+
+    try {
+        const ws = makeMockSocket({ readyState: 1 });
+        wsServer._connect(ws);
+        wsServer._emit('worker-register', ws, { workerId: 'w-tps' });
+        await new Promise((resolve) => setImmediate(resolve));
+        wsServer._emit('worker-ready', ws);
+
+        const mockStream = { closed: false, close() { this.closed = true; }, event() { return this; }, send() {} };
+        const jobId = router.enqueue({
+            payload: { message: 'performance', model: 'llama' },
+            stream: mockStream,
+            targetWorkerId: 'w-tps'
+        });
+
+        const activeJob = router.activeJobs.get(jobId);
+        assert.ok(activeJob);
+        activeJob.startedAtMs = 1000;
+
+        Date.now = () => 3000;
+
+        wsServer._emit('job-complete', ws, {
+            jobId,
+            usage: { completion_tokens: 60 }
+        });
+
+        await new Promise((resolve) => setImmediate(resolve));
+
+        assert.equal(updateCalls.length, 1);
+        assert.deepEqual(updateCalls[0], {
+            workerId: 'w-tps',
+            model: 'llama',
+            usage: { completion_tokens: 60 },
+            startedAtMs: 1000,
+            completedAtMs: 3000
+        });
+        assert.equal(router.activeJobs.has(jobId), false);
+    } finally {
+        Date.now = originalNow;
+    }
+});
+
+test('job-complete from stale replaced socket is ignored for TPS persistence', async () => {
+    const wsServer = makeMockWsServer();
+    const updateCalls = [];
+
+    const router = new StreamRouter({
+        wsServer,
+        workersModel: {
+            async bindConnectedWorker({ workerId }) {
+                return {
+                    worker: { id: workerId, userId: 'owner-1' },
+                    user: { id: 'owner-1' }
+                };
+            },
+            async markDisconnected() {
+                return undefined;
+            },
+            async updatePerformanceTps(input) {
+                updateCalls.push(input);
+                return 25;
+            }
+        }
+    });
+
+    const wsOld = makeMockSocket({ readyState: 1 });
+    wsServer._connect(wsOld);
+    wsServer._emit('worker-register', wsOld, { workerId: 'w-replaced' });
+    await new Promise((resolve) => setImmediate(resolve));
+    wsServer._emit('worker-ready', wsOld);
+
+    const mockStream = { closed: false, close() { this.closed = true; }, event() { return this; }, send() {} };
+    const jobId = router.enqueue({
+        payload: { message: 'performance', model: 'llama' },
+        stream: mockStream,
+        targetWorkerId: 'w-replaced'
+    });
+    assert.equal(router.activeJobs.has(jobId), true);
+
+    const wsNew = makeMockSocket({ readyState: 1 });
+    wsServer._connect(wsNew);
+    wsServer._emit('worker-register', wsNew, { workerId: 'w-replaced' });
+    await new Promise((resolve) => setImmediate(resolve));
+    wsServer._emit('worker-ready', wsNew);
+
+    wsServer._emit('job-complete', wsOld, {
+        jobId,
+        usage: { completion_tokens: 99 }
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(updateCalls.length, 0);
+    assert.equal(router.activeJobs.has(jobId), true);
+});

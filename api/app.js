@@ -7,6 +7,7 @@ import { errorMiddleware } from './middleware/error.js';
 import { router as usersRouter } from './routes/users.js';
 import { openAiRouterFactory } from './routes/openai.js';
 import { tasksRouterFactory } from './routes/tasks.js';
+import { workersRouterFactory } from './routes/workers.js';
 import { workersModel } from './models/workers.js';
 import { ordersModel } from './models/orders.js';
 
@@ -55,6 +56,7 @@ app.get('/ready', (req, res) => {
 
 app.use('/tasks', tasksRouterFactory({ streamRouter }));
 app.use('/users', usersRouter);
+app.use('/workers', workersRouterFactory({ workersModel, streamRouter }));
 app.use('/v1', openAiRouterFactory({ streamRouter }));
 
 app.use((req, res, next) => {
