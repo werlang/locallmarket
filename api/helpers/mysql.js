@@ -51,15 +51,19 @@ export class Mysql {
     /**
      * Executes a formatted SQL statement through mysql2.
      */
-    static async #query(sql, data) {
+    static async #query(sql, data, { connection } = {}) {
         // console.log(sql, data);
-        await Mysql.connect();
+        if (!connection) {
+            await Mysql.connect();
+        }
+
+        const executor = connection || Mysql.connection;
 
         const raw = Mysql.formatRaw(sql, data);
         // console.log(raw);
         // console.log(Mysql.format(sql, data));
         try {
-            const result = await Mysql.connection.execute(raw.sql.trim(), raw.data);
+            const result = await executor.execute(raw.sql.trim(), raw.data);
             if (result) return result[0];
             return result;
         }
@@ -75,7 +79,7 @@ export class Mysql {
     /**
      * Inserts one or many rows into the provided table.
      */
-    static async insert(table, data) {
+    static async insert(table, data, context = {}) {
         if (!data) {
             throw new CustomError('Invalid data for insert operation.');
         }
@@ -85,14 +89,14 @@ export class Mysql {
             const values = Object.values(row);
             const fields = Object.keys(row).map(k => `\`${k}\``);
             let sql = `INSERT INTO \`${table}\` (${fields.join(',')}) VALUES (${values.map(() => '?').join(',')})`;
-            return Mysql.#query(sql, values);
+            return Mysql.#query(sql, values, context);
         }));
     }
 
     /**
      * Updates rows in the provided table using an id or filter clause.
      */
-    static async update(table, data, id) {
+    static async update(table, data, id, context = {}) {
         if (!id) {
             throw new CustomError('No identifier provided for update.');
         }
@@ -112,7 +116,11 @@ export class Mysql {
                 }
                 else if (Object.keys(v)[0] === 'dec'){
                     values[i] = v.dec;
-                    return `\`${k}\` = ${k} - ?`;
+                    return `\`${k}\` = \`${k}\` - ?`;
+                }
+                else if (typeof v.toSqlString === 'function') {
+                    values[i] = null;
+                    return `\`${k}\` = ${v.toSqlString()}`;
                 }
                 else {
                     throw new CustomError('Invalid update operation.');
@@ -135,13 +143,14 @@ export class Mysql {
         const sql = `UPDATE \`${table}\` SET ${fielsdSql} WHERE ${id}`;
         // console.log(Mysql.format(sql, data));
         // replicateDB.saveUpdate(table, sql, data, this);
-        return Mysql.#query(sql, values);
+        const filteredValues = values.filter((value) => value !== null);
+        return Mysql.#query(sql, filteredValues, context);
     }
 
     /**
      * Deletes rows in the provided table using an id or filter clause.
      */
-    static async delete(table, clause, opt={}) {
+    static async delete(table, clause, opt={}, context = {}) {
         if (!clause) {
             throw new CustomError('Invalid clause for delete operation.');
         }
@@ -162,7 +171,7 @@ export class Mysql {
             data.push(clause);
         }
         
-        return Mysql.#query(sql, data);
+        return Mysql.#query(sql, data, context);
     }
 
     /**
@@ -232,7 +241,7 @@ export class Mysql {
     /**
      * Finds rows in the provided table using filter, projection, and paging options.
      */
-    static async find(table, { filter={}, view=[], opt={}} = {}) {
+    static async find(table, { filter={}, view=[], opt={}} = {}, context = {}) {
         view = Array.isArray(view) ? view : [ view ];
         view = view.length > 0 ? view.map(v => Mysql.#quoteIdentifier(v)).join(',') : '*';
 
@@ -263,9 +272,46 @@ export class Mysql {
         // OFFSET 10
         const offset = opt.skip ? `OFFSET ${ opt.skip }` : '';
 
-        const sql = `SELECT ${view} FROM \`${table}\` ${where} ${order} ${limit} ${offset}`;
+        // FOR UPDATE lock mode when inside transactions.
+        const lock = opt.forUpdate ? 'FOR UPDATE' : '';
+
+        const sql = `SELECT ${view} FROM \`${table}\` ${where} ${order} ${limit} ${offset} ${lock}`;
         // console.log(sql, values);
-        return Mysql.#query(sql, values);
+        return Mysql.#query(sql, values, context);
+    }
+
+    /**
+     * Finds a single row in the provided table using filter, projection, and paging options.
+     * @param {string} table
+     * @param {{ filter?: object, view?: string|string[], opt?: object }} options
+     * @returns {object|null}
+     */
+    static async findOne(table, options = {}, context = {}) {
+        const results = await Mysql.find(table, { ...options, opt: { ...options.opt, limit: 1 } }, context);
+        return results[0] || null;
+    }
+
+    /**
+     * Executes an operation inside a database transaction and manages lifecycle.
+     * @template T
+     * @param {(connection: import('mysql2/promise').PoolConnection) => Promise<T>} operation
+     * @returns {Promise<T>}
+     */
+    static async withTransaction(operation) {
+        await Mysql.connect();
+        const connection = await Mysql.connection.getConnection();
+
+        try {
+            await connection.beginTransaction();
+            const result = await operation(connection);
+            await connection.commit();
+            return result;
+        } catch (error) {
+            await connection.rollback();
+            throw error;
+        } finally {
+            connection.release();
+        }
     }
 
     /**
