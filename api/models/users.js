@@ -2,6 +2,8 @@ import { randomBytes, randomUUID } from 'crypto';
 import { HttpError } from '../helpers/error.js';
 import { Mysql } from '../helpers/mysql.js';
 
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 /**
  * Applies user business rules on top of persistence drivers.
  */
@@ -13,6 +15,24 @@ export class UsersModel {
     async register(input) {
         const id = randomUUID();
         const maxApiKeyRetries = 3;
+
+        // check for valid email
+        if (input.email && !EMAIL_REGEX.test(input.email)) {
+            throw new HttpError(400, 'Invalid email format.');
+        }
+
+        // check for duplicate email before attempting to insert, to avoid unnecessary API key generation attempts
+        if (input.email) {
+            const existing = await Mysql.findOne('users', {
+                filter: { email: input.email },
+                view: ['id'],
+                opt: { limit: 1 }
+            });
+
+            if (existing) {
+                throw new HttpError(409, 'A user with this email already exists.');
+            }
+        }
 
         for (let attempt = 0; attempt < maxApiKeyRetries; attempt += 1) {
             try {
@@ -223,7 +243,6 @@ export const usersModel = new UsersModel();
  */
 function mapUserRow(row) {
     return {
-        id: row.id,
         name: row.name,
         email: row.email,
         maxPrice: row.max_price === null ? null : Number(row.max_price),
