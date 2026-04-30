@@ -28,7 +28,7 @@ export class LLM {
                 throw new HttpError(response.status, `Model call failed with status ${response.status}`);
             }
 
-            await this.#processStream(response, stream, controller);
+            return await this.#processStream(response, stream, controller);
         }
         catch (error) {
             console.error("Error calling LLM API:", error);
@@ -40,6 +40,7 @@ export class LLM {
         const reader = response.body.getReader();
         const decoder = new TextDecoder("utf-8");
         let buffer = "";
+        let usage = null;
 
         try {
             while (true) {
@@ -56,10 +57,17 @@ export class LLM {
                         const data = line.substring(6).trim();
                         if (data === "[DONE]") {
                             stream.event('end').send("Stream complete.");
-                            return;
+                            return usage;
                         }
                         try {
                             const parsed = JSON.parse(data);
+                            if (parsed?.usage && typeof parsed.usage === 'object') {
+                                usage = {
+                                    prompt_tokens: Number(parsed.usage.prompt_tokens ?? 0),
+                                    completion_tokens: Number(parsed.usage.completion_tokens ?? 0),
+                                    total_tokens: Number(parsed.usage.total_tokens ?? 0)
+                                };
+                            }
                             const content = parsed.choices?.[0]?.delta?.content || "";
                             if (content) {
                                 stream.event('message').send(content);
@@ -78,6 +86,8 @@ export class LLM {
             controller.abort();
             throw new HttpError(500, "Error processing LLM stream.");
         }
+
+        return usage;
 
     }
 }

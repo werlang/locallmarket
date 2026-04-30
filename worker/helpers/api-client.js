@@ -188,9 +188,9 @@ export class ApiStreamClient {
                 host: request.host || process.env.MODEL_RUNNER_HOST
             });
 
-            await llm.streamOutput(request.message, stream);
+            const usage = await llm.streamOutput(request.message, stream);
             console.log(`[${new Date().toISOString()}] Completed job ${jobId}.`);
-            this.sendToSocket(jobSocket, 'job-complete', { jobId });
+            this.sendToSocket(jobSocket, 'job-complete', { jobId, usage });
         } catch (error) {
             const message = error?.message || 'Failed to process stream job.';
             stream.event('error').send(JSON.stringify({ error: message }));

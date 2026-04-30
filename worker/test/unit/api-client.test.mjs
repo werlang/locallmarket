@@ -58,6 +58,44 @@ test('ApiStreamClient.sendToSocket', async (t) => {
     });
 });
 
+test('ApiStreamClient.handleSocketOpen', async (t) => {
+    await t.test('registers with worker id and api key, then marks ready', () => {
+        const client = new ApiStreamClient({ workerId: 'w1', apiKey: 'a'.repeat(64) });
+        const socket = new FakeSocket();
+        client.socket = socket;
+
+        client.handleSocketOpen(socket);
+
+        assert.equal(socket.sent.length, 2);
+        assert.deepEqual(socket.sent[0], {
+            type: 'worker-register',
+            payload: {
+                workerId: 'w1',
+                apiKey: 'a'.repeat(64)
+            }
+        });
+        assert.deepEqual(socket.sent[1], {
+            type: 'worker-ready',
+            payload: { workerId: 'w1' }
+        });
+    });
+
+    await t.test('closes the socket when no api key is configured', () => {
+        const client = new ApiStreamClient({ workerId: 'w1', apiKey: '' });
+        const socket = new FakeSocket();
+        let closeCalled = false;
+        socket.close = () => {
+            closeCalled = true;
+        };
+        client.socket = socket;
+
+        client.handleSocketOpen(socket);
+
+        assert.equal(closeCalled, true);
+        assert.equal(socket.sent.length, 0);
+    });
+});
+
 test('ApiStreamClient.sendReady', async (t) => {
     await t.test('sends worker-ready message when not busy', () => {
         const client = new ApiStreamClient({ workerId: 'w1', apiKey: 'test-api-key' });
