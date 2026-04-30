@@ -22,9 +22,12 @@ export function openAiRouterFactory({ streamRouter }) {
             requesterId = requester.id;
             const payload = parseChatCompletionsBody(req.body);
 
-            const workerOffer = await ordersModel.findFirstAvailableOfferByModel(payload.model);
+            const workerOffer = await ordersModel.findFirstAvailableOfferByModel(payload.model, {
+                maxPrice: requester.maxPrice,
+                minTps: requester.minTps
+            });
             if (!workerOffer) {
-                throw new HttpError(409, `No available worker found for model ${payload.model}.`);
+                throw new HttpError(409, `No available worker found for model ${payload.model} within your price and TPS requirements.`);
             }
 
             const createdOrder = await ordersModel.create(requester.id, {

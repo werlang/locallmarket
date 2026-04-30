@@ -113,9 +113,10 @@ export class OrdersModel {
      * Public offers are represented by order rows marked available and not consumed.
      *
      * @param {string} model
+     * @param {{ maxPrice?: number | null, minTps?: number | null }} [constraints]
      * @returns {Promise<{ id: number, userId: string, workerId: string, model: string, price: number, tps: number } | null>}
      */
-    async findFirstAvailableOfferByModel(model) {
+    async findFirstAvailableOfferByModel(model, { maxPrice, minTps } = {}) {
         this.ensureStreamRouter();
 
         const normalizedModel = typeof model === 'string' ? model.trim() : '';
@@ -123,12 +124,22 @@ export class OrdersModel {
             throw new HttpError(400, 'model must be a non-empty string.');
         }
 
+        const filter = {
+            model: normalizedModel,
+            is_available: 1,
+            is_consumed: 0
+        };
+
+        if (maxPrice != null) {
+                filter.price = Mysql.lte(maxPrice);
+        }
+
+        if (minTps != null) {
+                filter.tps = Mysql.gte(minTps);
+        }
+
         const candidates = await Mysql.find('orders', {
-            filter: {
-                model: normalizedModel,
-                is_available: 1,
-                is_consumed: 0
-            },
+            filter,
             view: [
                 'id',
                 'user_id',
@@ -144,12 +155,21 @@ export class OrdersModel {
             ],
             opt: {
                 limit: 100,
-                order: { id: 1 }
+                order: { price: 1, tps: -1 }
             }
         });
 
         for (const candidate of candidates) {
             const order = mapOrderRow(candidate);
+
+            if (maxPrice != null && order.price > maxPrice) {
+                continue;
+            }
+
+            if (minTps != null && order.tps < minTps) {
+                continue;
+            }
+
             if (!this.streamRouter.isWorkerConnected(order.workerId)) {
                 continue;
             }

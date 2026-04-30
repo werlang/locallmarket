@@ -292,9 +292,9 @@ export class Mysql {
         const where = filterNames.length > 0 ? `WHERE ${ whereStatements }` : '';
 
         // ORDER BY id DESC
-        const order = opt.order
-            ? `ORDER BY ${ Mysql.#quoteIdentifier(Object.keys(opt.order)[0]) } ${ Object.values(opt.order)[0] === 1 ? 'ASC' : 'DESC' }`
-            : '';
+            const order = opt.order && Object.keys(opt.order).length > 0
+                ? `ORDER BY ${ Object.entries(opt.order).map(([col, dir]) => `${ Mysql.#quoteIdentifier(col) } ${ dir === 1 ? 'ASC' : 'DESC' }`).join(', ') }`
+                : '';
         
         // LIMIT 10
         const limit = opt.limit ? `LIMIT ${ opt.limit }` : '';

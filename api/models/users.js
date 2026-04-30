@@ -79,6 +79,8 @@ export class UsersModel {
                 'id',
                 'name',
                 'email',
+                'max_price',
+                'min_tps',
                 'credits',
                 'created_at',
                 'updated_at'
@@ -96,13 +98,15 @@ export class UsersModel {
     /**
      * Updates mutable user profile fields.
      * @param {string} id
-     * @param {{ name?: string, email?: string }} input
+     * @param {{ name?: string, email?: string, maxPrice?: number | null, minTps?: number | null }} input
      */
     async updateById(id, input) {
         const user = await this.getById(id);
         const updateData = {
             ...(input.name !== undefined ? { name: input.name } : {}),
-            ...(input.email !== undefined ? { email: input.email } : {})
+            ...(input.email !== undefined ? { email: input.email } : {}),
+            ...(input.maxPrice !== undefined ? { max_price: input.maxPrice } : {}),
+            ...(input.minTps !== undefined ? { min_tps: input.minTps } : {})
         };
 
         try {
@@ -177,6 +181,8 @@ export class UsersModel {
                 'id',
                 'name',
                 'email',
+                'max_price',
+                'min_tps',
                 'credits',
                 'created_at',
                 'updated_at'
@@ -197,6 +203,8 @@ export class UsersModel {
                 'id',
                 'name',
                 'email',
+                'max_price',
+                'min_tps',
                 'credits',
                 'created_at',
                 'updated_at'
@@ -211,13 +219,15 @@ export class UsersModel {
 export const usersModel = new UsersModel();
 
 /**
- * @param {{ id: string, name: string | null, email: string | null, credits: number | string, created_at: Date | string, updated_at: Date | string }} row
+ * @param {{ id: string, name: string | null, email: string | null, max_price: number | string | null, min_tps: number | string | null, credits: number | string, created_at: Date | string, updated_at: Date | string }} row
  */
 function mapUserRow(row) {
     return {
         id: row.id,
         name: row.name,
         email: row.email,
+        maxPrice: row.max_price === null ? null : Number(row.max_price),
+        minTps: row.min_tps === null ? null : Number(row.min_tps),
         credits: Number(row.credits),
         createdAt: row.created_at,
         updatedAt: row.updated_at

@@ -31,3 +31,10 @@
 - Worker completion events update observed TPS for active offers of the same worker/model using completion tokens over elapsed execution time.
 - Billing settlement is triggered on completion through `StreamRouter` settlement hooks that call `ordersModel.settleCompletedOrder(...)`.
 - On job abort before completion, compensating refund/unconsume logic restores order and credit state.
+
+## User Settings and Worker Matching Constraints
+
+- The `users` table has nullable `max_price DECIMAL(18,6)` and `min_tps INT UNSIGNED` columns. Users who have not configured constraints get NULL (no restriction applied during matching).
+- `POST /v1/chat/completions` enforces the requester's `maxPrice` and `minTps` settings when selecting a worker offer: only offers at or below `maxPrice` and at or above `minTps` are candidates.
+- `OrdersModel.findFirstAvailableOfferByModel(model, { maxPrice, minTps })` orders by `price ASC, tps DESC` (cheapest first, highest TPS as tiebreaker) and applies DB-level operator filters (`{ '<=': maxPrice }`, `{ '>=': minTps }`) in addition to in-loop connectivity/ownership guards.
+- `Mysql.find` `opt.order` supports multi-column ordering via an object of `{ col: 1|-1, ... }` entries; all entries are emitted as `ORDER BY col1 ASC, col2 DESC`.
