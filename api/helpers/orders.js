@@ -1,20 +1,6 @@
 import { HttpError } from './error.js';
 import { HttpStream } from './stream.js';
 
-/**
- * Validates and normalizes owner identity received in request headers.
- * @param {Record<string, unknown>} headers
- * @returns {string}
- */
-export function parseOwnerIdHeader(headers) {
-    const raw = headers?.['x-user-id'];
-
-    if (typeof raw !== 'string' || raw.trim().length === 0) {
-        throw new HttpError(401, 'x-user-id header is required.');
-    }
-
-    return raw.trim();
-}
 
 /**
  * Validates payload for order creation.

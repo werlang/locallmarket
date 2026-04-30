@@ -1,4 +1,4 @@
-import { randomUUID } from 'crypto';
+import { randomBytes, randomUUID } from 'crypto';
 import { HttpError } from '../helpers/error.js';
 import { Mysql } from '../helpers/mysql.js';
 
@@ -11,22 +11,36 @@ export class UsersModel {
      * @param {{ name?: string, email?: string }} input
      */
     async register(input) {
-        try {
-            const id = randomUUID();
-            const record = {
-                id,
-                ...(input.name !== undefined ? { name: input.name } : {}),
-                ...(input.email !== undefined ? { email: input.email } : {})
-            };
-            await Mysql.insert('users', record);
-            return this.getByIdOrNull(id);
-        } catch (error) {
-            if (isDuplicateEntryError(error)) {
-                throw new HttpError(409, 'A user with this identity already exists.');
-            }
+        const id = randomUUID();
+        const maxApiKeyRetries = 3;
 
-            throw error;
+        for (let attempt = 0; attempt < maxApiKeyRetries; attempt += 1) {
+            try {
+                const apiKey = generateApiKey();
+                const record = {
+                    id,
+                    api_key: apiKey,
+                    ...(input.name !== undefined ? { name: input.name } : {}),
+                    ...(input.email !== undefined ? { email: input.email } : {})
+                };
+                await Mysql.insert('users', record);
+                const user = await this.getByIdOrNull(id);
+
+                return { user, apiKey };
+            } catch (error) {
+                if (isDuplicateEntryError(error) && isDuplicateFieldError(error, 'api_key')) {
+                    continue;
+                }
+
+                if (isDuplicateEntryError(error)) {
+                    throw new HttpError(409, 'A user with this identity already exists.');
+                }
+
+                throw error;
+            }
         }
+
+        throw new HttpError(500, 'Could not generate an API key. Please retry.');
     }
 
     /**
@@ -37,6 +51,19 @@ export class UsersModel {
         const user = await this.getByIdOrNull(id);
         if (!user) {
             throw new HttpError(404, 'User not found.');
+        }
+
+        return user;
+    }
+
+    /**
+     * Resolves a user from a Bearer API key.
+     * @param {string} apiKey
+     */
+    async getByApiKey(apiKey) {
+        const user = await this.getByApiKeyOrNull(apiKey);
+        if (!user) {
+            throw new HttpError(401, 'Invalid API key.');
         }
 
         return user;
@@ -114,10 +141,37 @@ export class UsersModel {
     }
 
     /**
+     * Recreates a user's API key and returns the new secret.
      * @param {string} id
      */
-    async getByIdOrNullOrNull(id) {
-        const users = await Mysql.findOne('users', {
+    async resetApiKeyById(id) {
+        const user = await this.getById(id);
+        const maxApiKeyRetries = 3;
+
+        for (let attempt = 0; attempt < maxApiKeyRetries; attempt += 1) {
+            const apiKey = generateApiKey();
+
+            try {
+                await Mysql.update('users', { api_key: apiKey }, user.id);
+                const refreshed = await this.getByIdOrNull(user.id);
+                return { user: refreshed, apiKey };
+            } catch (error) {
+                if (isDuplicateEntryError(error) && isDuplicateFieldError(error, 'api_key')) {
+                    continue;
+                }
+
+                throw error;
+            }
+        }
+
+        throw new HttpError(500, 'Could not reset API key. Please retry.');
+    }
+
+    /**
+     * @param {string} id
+     */
+    async getByIdOrNull(id) {
+        const user = await Mysql.findOne('users', {
             filter: { id },
             view: [
                 'id',
@@ -130,7 +184,27 @@ export class UsersModel {
             opt: { limit: 1 }
         });
 
-        return users ? mapUserRow(users) : null;
+        return user ? mapUserRow(user) : null;
+    }
+
+    /**
+     * @param {string} apiKey
+     */
+    async getByApiKeyOrNull(apiKey) {
+        const user = await Mysql.findOne('users', {
+            filter: { api_key: apiKey },
+            view: [
+                'id',
+                'name',
+                'email',
+                'credits',
+                'created_at',
+                'updated_at'
+            ],
+            opt: { limit: 1 }
+        });
+
+        return user ? mapUserRow(user) : null;
     }
 }
 
@@ -156,4 +230,20 @@ function mapUserRow(row) {
 function isDuplicateEntryError(error) {
     return error?.code === 'ER_DUP_ENTRY'
         || error?.data?.error?.code === 'ER_DUP_ENTRY';
+}
+
+/**
+ * @param {any} error
+ * @param {string} field
+ */
+function isDuplicateFieldError(error, field) {
+    const message = error?.message || error?.data?.error?.message || '';
+    return typeof message === 'string' && message.includes(field);
+}
+
+/**
+ * @returns {string}
+ */
+function generateApiKey() {
+    return randomBytes(32).toString('hex');
 }

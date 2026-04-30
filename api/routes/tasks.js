@@ -1,10 +1,11 @@
 import express from 'express';
 import { applyOrderUseStream } from '../helpers/orders.js';
 import { ordersModel } from '../models/orders.js';
+import { usersModel } from '../models/users.js';
+import { parseBearerApiKey } from '../helpers/auth.js';
 import { HttpStream } from '../helpers/stream.js';
 import {
     parseLegacyStreamBody,
-    parseOwnerIdHeader,
     parseOrderId,
     parseUseWorkerBody,
 } from '../helpers/orders.js';
@@ -14,7 +15,9 @@ const router = express.Router();
 export function tasksRouterFactory({ streamRouter }) {
     router.post('/:orderid/run', async (req, res, next) => {
         try {
-            const consumerId = parseOwnerIdHeader(req.headers);
+            const apiKey = parseBearerApiKey(headers);
+            const user = await usersModel.getByApiKey(apiKey);
+            const consumerId = user.id;
             const orderId = parseOrderId(req.params.orderid);
             const streamBody = parseUseWorkerBody(req.body);
             const consumed = await ordersModel.consumeForUse(consumerId, orderId);

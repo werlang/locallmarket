@@ -1,9 +1,10 @@
 import express from 'express';
+import { HttpError } from '../helpers/error.js';
+import { parseBearerApiKey } from '../helpers/auth.js';
 import { sendCreated, sendSuccess } from '../helpers/response.js';
 import { usersModel } from '../models/users.js';
 import {
     parseCreateUserBody,
-    parseUserId,
     parseListUsersQuery,
     parseRechargeBody,
     parseUpdateUserBody
@@ -14,9 +15,9 @@ export const router = express.Router();
 router.post('/users', async (req, res, next) => {
     try {
         const payload = parseCreateUserBody(req.body);
-        const user = await usersModel.register(payload);
+        const { user, apiKey } = await usersModel.register(payload);
 
-        return sendCreated(res, { body: { user } });
+        return sendCreated(res, { body: { user, apiKey } });
     } catch (error) {
         return next(error);
     }
@@ -33,10 +34,10 @@ router.get('/users', async (req, res, next) => {
     }
 });
 
-router.get('/users/:id', async (req, res, next) => {
+router.get('/users/:apiKey', async (req, res, next) => {
     try {
-        const id = parseUserId(req.params.id);
-        const user = await usersModel.getById(id);
+        const apiKey = parseBearerApiKey(req.headers);
+        const user = await usersModel.getByApiKey(apiKey);
 
         return sendSuccess(res, { body: { user } });
     } catch (error) {
@@ -44,11 +45,12 @@ router.get('/users/:id', async (req, res, next) => {
     }
 });
 
-router.put('/users/:id', async (req, res, next) => {
+router.put('/users/:apiKey', async (req, res, next) => {
     try {
-        const id = parseUserId(req.params.id);
+        const apiKey = parseBearerApiKey(req.headers);
+        const user = await usersModel.getByApiKey(apiKey);
         const payload = parseUpdateUserBody(req.body);
-        const user = await usersModel.updateById(id, payload);
+        const updatedUser = await usersModel.updateById(user.id, payload);
 
         return sendSuccess(res, { body: { user } });
     } catch (error) {
@@ -56,11 +58,12 @@ router.put('/users/:id', async (req, res, next) => {
     }
 });
 
-router.post('/users/:id/recharge', async (req, res, next) => {
+router.post('/users/:apiKey/recharge', async (req, res, next) => {
     try {
-        const id = parseUserId(req.params.id);
+        const apiKey = parseBearerApiKey(req.headers);
+        const user = await usersModel.getByApiKey(apiKey);
         const amount = parseRechargeBody(req.body);
-        const user = await usersModel.rechargeById(id, amount);
+        const updatedUser = await usersModel.rechargeById(user.id, amount);
 
         return sendSuccess(res, { body: { user } });
     } catch (error) {
@@ -68,10 +71,23 @@ router.post('/users/:id/recharge', async (req, res, next) => {
     }
 });
 
-router.delete('/users/:id', async (req, res, next) => {
+router.post('/users/:apiKey/reset', async (req, res, next) => {
     try {
-        const id = parseUserId(req.params.id);
-        await usersModel.deleteById(id);
+        const apiKey = parseBearerApiKey(req.headers);
+        const user = await usersModel.getByApiKey(apiKey);
+        const { user, apiKey } = await usersModel.resetApiKeyById(user.id);
+
+        return sendSuccess(res, { body: { user, apiKey } });
+    } catch (error) {
+        return next(error);
+    }
+});
+
+router.delete('/users/:apiKey', async (req, res, next) => {
+    try {
+        const apiKey = parseBearerApiKey(req.headers);
+        const user = await usersModel.getByApiKey(apiKey);
+        await usersModel.deleteById(user.id);
 
         return sendSuccess(res);
     } catch (error) {

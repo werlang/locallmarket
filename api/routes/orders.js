@@ -1,11 +1,12 @@
 import express from 'express';
+import { parseBearerApiKey } from '../helpers/auth.js';
 import { sendCreated, sendSuccess } from '../helpers/response.js';
 import { ordersModel } from '../models/orders.js';
+import { usersModel } from '../models/users.js';
 import {
     parseCreateOrderBody,
     parseListOrdersQuery,
     parseOrderId,
-    parseOwnerIdHeader,
     parseUpdateOrderBody
 } from '../helpers/orders.js';
 
@@ -13,7 +14,7 @@ export const router = express.Router();
 
 router.post('/order', async (req, res, next) => {
     try {
-        const ownerId = parseOwnerIdHeader(req.headers);
+        const ownerId = await resolveUserIdFromBearer(req.headers);
         const payload = parseCreateOrderBody(req.body);
         const order = await ordersModel.create(ownerId, payload);
 
@@ -36,7 +37,7 @@ router.get('/orders', async (req, res, next) => {
 
 router.get('/order/:orderId', async (req, res, next) => {
     try {
-        const ownerId = parseOwnerIdHeader(req.headers);
+        const ownerId = await resolveUserIdFromBearer(req.headers);
         const orderId = parseOrderId(req.params.orderId);
         const order = await ordersModel.getOwnById(ownerId, orderId);
 
@@ -48,7 +49,7 @@ router.get('/order/:orderId', async (req, res, next) => {
 
 router.put('/order/:orderId', async (req, res, next) => {
     try {
-        const ownerId = parseOwnerIdHeader(req.headers);
+        const ownerId = await resolveUserIdFromBearer(req.headers);
         const orderId = parseOrderId(req.params.orderId);
         const payload = parseUpdateOrderBody(req.body);
         const order = await ordersModel.updateOwn(ownerId, orderId, payload);
@@ -61,7 +62,7 @@ router.put('/order/:orderId', async (req, res, next) => {
 
 router.delete('/order/:orderId', async (req, res, next) => {
     try {
-        const ownerId = parseOwnerIdHeader(req.headers);
+        const ownerId = await resolveUserIdFromBearer(req.headers);
         const orderId = parseOrderId(req.params.orderId);
         await ordersModel.deleteOwn(ownerId, orderId);
 
@@ -70,3 +71,13 @@ router.delete('/order/:orderId', async (req, res, next) => {
         return next(error);
     }
 });
+
+/**
+ * Resolves the authenticated user id from Authorization: Bearer <api-key>.
+ * @param {Record<string, unknown>} headers
+ */
+async function resolveUserIdFromBearer(headers) {
+    const apiKey = parseBearerApiKey(headers);
+    const user = await usersModel.getByApiKey(apiKey);
+    return user.id;
+}
