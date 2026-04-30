@@ -12,59 +12,64 @@ function makeModel(methods) {
     return new UsersModel({ usersDriver: methods });
 }
 
-test('register rejects duplicated externalId', async () => {
+test('register maps ER_DUP_ENTRY to 409', async () => {
     const model = makeModel({
-        async getUserByExternalId() {
-            return { id: 1, externalId: 'user-1' };
+        async getUserById() {
+            return null;
+        },
+        async createUser() {
+            const err = new Error('Duplicate entry');
+            err.code = 'ER_DUP_ENTRY';
+            throw err;
         }
     });
 
     await assert.rejects(
-        () => model.register({ externalId: 'user-1' }),
+        () => model.register({}),
         /already exists/
     );
 });
 
-test('getByExternalId throws 404 when user does not exist', async () => {
+test('getById throws 404 when user does not exist', async () => {
     const model = makeModel({
-        async getUserByExternalId() {
+        async getUserById() {
             return null;
         }
     });
 
     await assert.rejects(
-        () => model.getByExternalId('missing-user'),
+        () => model.getById('missing-user'),
         /User not found/
     );
 });
 
-test('updateByExternalId updates by internal id', async () => {
+test('updateById updates by id', async () => {
     const model = makeModel({
-        async getUserByExternalId() {
-            return { id: 10, externalId: 'user-10' };
+        async getUserById() {
+            return { id: 'uuid-10' };
         },
         async updateUser(id, input) {
-            return { id, externalId: 'user-10', ...input };
+            return { id, ...input };
         }
     });
 
-    const result = await model.updateByExternalId('user-10', { name: 'Bob' });
-    assert.equal(result.id, 10);
+    const result = await model.updateById('uuid-10', { name: 'Bob' });
+    assert.equal(result.id, 'uuid-10');
     assert.equal(result.name, 'Bob');
 });
 
-test('rechargeByExternalId applies recharge on internal id', async () => {
+test('rechargeById applies recharge on id', async () => {
     const model = makeModel({
-        async getUserByExternalId() {
-            return { id: 7, externalId: 'user-7' };
+        async getUserById() {
+            return { id: 'uuid-7' };
         },
         async rechargeCredits(id, amount) {
             return { id, credits: amount };
         }
     });
 
-    const result = await model.rechargeByExternalId('user-7', 15);
-    assert.equal(result.id, 7);
+    const result = await model.rechargeById('uuid-7', 15);
+    assert.equal(result.id, 'uuid-7');
     assert.equal(result.credits, 15);
 });
 
@@ -80,11 +85,11 @@ test('list forwards pagination options to driver', async () => {
     assert.deepEqual(result[0].options, { limit: 5, offset: 10 });
 });
 
-test('deleteByExternalId resolves user and deletes by internal id', async () => {
+test('deleteById resolves user and deletes by id', async () => {
     let deletedId = null;
     const model = makeModel({
-        async getUserByExternalId() {
-            return { id: 22, externalId: 'user-22' };
+        async getUserById() {
+            return { id: 'uuid-22' };
         },
         async deleteUser(id) {
             deletedId = id;
@@ -92,45 +97,27 @@ test('deleteByExternalId resolves user and deletes by internal id', async () => 
         }
     });
 
-    await model.deleteByExternalId('user-22');
-    assert.equal(deletedId, 22);
+    await model.deleteById('uuid-22');
+    assert.equal(deletedId, 'uuid-22');
 });
 
-test('deleteByExternalId throws 404 when user does not exist', async () => {
+test('deleteById throws 404 when user does not exist', async () => {
     const model = makeModel({
-        async getUserByExternalId() {
+        async getUserById() {
             return null;
         }
     });
 
     await assert.rejects(
-        () => model.deleteByExternalId('ghost'),
+        () => model.deleteById('ghost'),
         /User not found/
     );
 });
 
-test('register maps ER_DUP_ENTRY from driver to 409', async () => {
+test('updateById maps ER_DUP_ENTRY to 409', async () => {
     const model = makeModel({
-        async getUserByExternalId() {
-            return null;
-        },
-        async createUser() {
-            const err = new Error('Duplicate entry');
-            err.code = 'ER_DUP_ENTRY';
-            throw err;
-        }
-    });
-
-    await assert.rejects(
-        () => model.register({ externalId: 'u1' }),
-        /already exists/
-    );
-});
-
-test('updateByExternalId maps ER_DUP_ENTRY from driver to 409', async () => {
-    const model = makeModel({
-        async getUserByExternalId() {
-            return { id: 5, externalId: 'u5' };
+        async getUserById() {
+            return { id: 'uuid-5' };
         },
         async updateUser() {
             const err = new Error('Duplicate entry');
@@ -140,7 +127,7 @@ test('updateByExternalId maps ER_DUP_ENTRY from driver to 409', async () => {
     });
 
     await assert.rejects(
-        () => model.updateByExternalId('u5', { email: 'taken@example.com' }),
+        () => model.updateById('uuid-5', { email: 'taken@example.com' }),
         /Email already in use/
     );
 });

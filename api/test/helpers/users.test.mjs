@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
     parseCreateUserBody,
-    parseExternalId,
+    parseUserId,
     parseListUsersQuery,
     parseRechargeBody,
     parseUpdateUserBody
@@ -11,20 +11,18 @@ import {
 
 test('parseCreateUserBody validates and normalizes fields', () => {
     const payload = parseCreateUserBody({
-        externalId: '  user-1  ',
         name: '  Alice  ',
         email: '  ALICE@example.com  '
     });
 
     assert.deepEqual(payload, {
-        externalId: 'user-1',
         name: 'Alice',
         email: 'alice@example.com'
     });
 });
 
-test('parseExternalId rejects missing externalId', () => {
-    assert.throws(() => parseExternalId('   '), /externalId must be a non-empty string/);
+test('parseUserId rejects missing id', () => {
+    assert.throws(() => parseUserId('   '), /userId must be a non-empty string/);
 });
 
 test('parseUpdateUserBody requires at least one mutable field', () => {
@@ -47,22 +45,16 @@ test('parseListUsersQuery applies defaults and validates values', () => {
     assert.throws(() => parseListUsersQuery({ offset: -1 }), /offset must be a non-negative integer/);
 });
 
-test('parseCreateUserBody rejects missing externalId', () => {
-    assert.throws(() => parseCreateUserBody({}), /externalId must be a non-empty string/);
-    assert.throws(() => parseCreateUserBody({ externalId: '   ' }), /externalId must be a non-empty string/);
-});
-
 test('parseCreateUserBody rejects invalid email', () => {
     assert.throws(
-        () => parseCreateUserBody({ externalId: 'u1', email: 'not-an-email' }),
+        () => parseCreateUserBody({ email: 'not-an-email' }),
         /valid email/
     );
 });
 
 test('parseCreateUserBody trims and lowercases email', () => {
-    const result = parseCreateUserBody({ externalId: 'u1', email: '  Bob@Example.COM  ' });
+    const result = parseCreateUserBody({ email: '  Bob@Example.COM  ' });
     assert.equal(result.email, 'bob@example.com');
-    assert.equal(result.externalId, 'u1');
 });
 
 test('parseUpdateUserBody rejects empty name string', () => {

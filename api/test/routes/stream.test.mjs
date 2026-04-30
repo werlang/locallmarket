@@ -65,9 +65,9 @@ test('createStreamRouter /stream with orderId uses order consume mode', async ()
     const enqueued = [];
 
     const ordersModel = {
-        async consumeForUse(externalId, orderId) {
+        async consumeForUse(consumerId, orderId) {
             consumeCalls += 1;
-            assert.equal(externalId, 'consumer-stream');
+            assert.equal(consumerId, 'consumer-stream');
             assert.equal(orderId, 11);
             return {
                 status: 'consumed',
@@ -95,7 +95,7 @@ test('createStreamRouter /stream with orderId uses order consume mode', async ()
     const handler = getPostHandler(router, '/stream');
 
     const req = {
-        headers: { 'x-user-external-id': 'consumer-stream' },
+        headers: { 'x-user-id': 'consumer-stream' },
         body: { orderId: '11', message: 'route dispatch' }
     };
     const res = makeMockRes();
@@ -140,7 +140,7 @@ test('createStreamRouter /workers/:orderid/use preserves param-based order consu
 
     const req = {
         params: { orderid: '29' },
-        headers: { 'x-user-external-id': 'consumer-param' },
+        headers: { 'x-user-id': 'consumer-param' },
         body: { message: 'from param route' }
     };
     const res = makeMockRes();

@@ -18,7 +18,7 @@ function makeModel({ ordersDriver = {}, usersDriver = {}, isWorkerConnected = ()
 test('create rejects orders for disconnected workers', async () => {
     const model = makeModel({
         usersDriver: {
-            async getUserByExternalId() {
+            async getUserById() {
                 return { id: 1 };
             }
         },
@@ -34,7 +34,7 @@ test('create rejects orders for disconnected workers', async () => {
 test('create uses owner internal id when persisting', async () => {
     const model = makeModel({
         usersDriver: {
-            async getUserByExternalId() {
+            async getUserById() {
                 return { id: 42 };
             }
         },
@@ -60,7 +60,7 @@ test('create uses owner internal id when persisting', async () => {
 test('updateOwn enforces owner scoping', async () => {
     const model = makeModel({
         usersDriver: {
-            async getUserByExternalId() {
+            async getUserById() {
                 return { id: 2 };
             }
         },
@@ -81,7 +81,7 @@ test('deleteOwn deletes only when owner matches', async () => {
     let deleted = null;
     const model = makeModel({
         usersDriver: {
-            async getUserByExternalId() {
+            async getUserById() {
                 return { id: 7 };
             }
         },
@@ -174,7 +174,7 @@ test('consumeForUse returns consumed order payload', async () => {
                 return {
                     status: 'consumed',
                     order: { id: 4, workerId: 'w-1', model: 'llama' },
-                    consumer: { id: 9, externalId: 'consumer-1', credits: 2 }
+                    consumer: { id: 9, credits: 2 }
                 };
             }
         }
@@ -195,9 +195,9 @@ test('unconsumForUse calls driver and returns restored status', async () => {
 
     const model = makeModel({
         ordersDriver: {
-            async unconsumOrderForUse({ orderId, consumerExternalId }) {
+            async unconsumOrderForUse({ orderId, consumerId }) {
                 assert.equal(orderId, 4);
-                assert.equal(consumerExternalId, 'consumer-1');
+                assert.equal(consumerId, 'consumer-1');
                 driverCalled = true;
                 return restoredResult;
             }
@@ -260,7 +260,7 @@ test('unconsumForUse throws 404 when driver returns consumer_not_found', async (
 test('create throws 404 when owner user is not found', async () => {
     const model = makeModel({
         usersDriver: {
-            async getUserByExternalId() { return null; }
+            async getUserById() { return null; }
         }
     });
 
@@ -273,7 +273,7 @@ test('create throws 404 when owner user is not found', async () => {
 test('getOwnById returns order when owner matches', async () => {
     const model = makeModel({
         usersDriver: {
-            async getUserByExternalId() { return { id: 5 }; }
+            async getUserById() { return { id: 5 }; }
         },
         ordersDriver: {
             async getOrderById() {
@@ -290,7 +290,7 @@ test('getOwnById returns order when owner matches', async () => {
 test('getOwnById throws 404 when order is not found', async () => {
     const model = makeModel({
         usersDriver: {
-            async getUserByExternalId() { return { id: 5 }; }
+            async getUserById() { return { id: 5 }; }
         },
         ordersDriver: {
             async getOrderById() { return null; }
@@ -306,7 +306,7 @@ test('getOwnById throws 404 when order is not found', async () => {
 test('getOwnById throws 403 when order belongs to a different user', async () => {
     const model = makeModel({
         usersDriver: {
-            async getUserByExternalId() { return { id: 5 }; }
+            async getUserById() { return { id: 5 }; }
         },
         ordersDriver: {
             async getOrderById() {
@@ -325,7 +325,7 @@ test('updateOwn returns updated order when owner matches and update is valid', a
     let updatedWith = null;
     const model = makeModel({
         usersDriver: {
-            async getUserByExternalId() { return { id: 7 }; }
+            async getUserById() { return { id: 7 }; }
         },
         ordersDriver: {
             async getOrderById() {
@@ -347,7 +347,7 @@ test('updateOwn returns updated order when owner matches and update is valid', a
 test('updateOwn rejects new workerId that references a disconnected worker', async () => {
     const model = makeModel({
         usersDriver: {
-            async getUserByExternalId() { return { id: 7 }; }
+            async getUserById() { return { id: 7 }; }
         },
         ordersDriver: {
             async getOrderById() {

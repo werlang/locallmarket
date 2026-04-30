@@ -8,20 +8,20 @@ import {
     parseLegacyStreamBody,
     parseListOrdersQuery,
     parseOrderId,
-    parseOwnerExternalIdHeader,
+    parseOwnerIdHeader,
     parseUseWorkerBody,
     parseUpdateOrderBody
 } from '../../helpers/orders.js';
 
-test('parseOwnerExternalIdHeader requires x-user-external-id header', () => {
+test('parseOwnerIdHeader requires x-user-id header', () => {
     assert.equal(
-        parseOwnerExternalIdHeader({ 'x-user-external-id': ' user-1 ' }),
+        parseOwnerIdHeader({ 'x-user-id': ' user-1 ' }),
         'user-1'
     );
 
     assert.throws(
-        () => parseOwnerExternalIdHeader({}),
-        /x-user-external-id header is required/
+        () => parseOwnerIdHeader({}),
+        /x-user-id header is required/
     );
 });
 
@@ -156,7 +156,7 @@ test('applyOrderUseStream opens SSE stream and enqueues targeted job on successf
         cancel() {}
     };
 
-    const req = { headers: { 'x-user-external-id': 'consumer-1' }, body: { message: 'hello' } };
+    const req = { headers: { 'x-user-id': 'consumer-1' }, body: { message: 'hello' } };
     const res = makeMockRes();
     const errors = [];
     const next = (err) => errors.push(err);
@@ -196,7 +196,7 @@ test('applyOrderUseStream legacy /stream route: orderId sourced from body', asyn
         cancel() {}
     };
 
-    const req = { headers: { 'x-user-external-id': 'consumer-2' }, body: { orderId: '7', message: 'query' } };
+    const req = { headers: { 'x-user-id': 'consumer-2' }, body: { orderId: '7', message: 'query' } };
     const res = makeMockRes();
     const next = () => {};
 
@@ -222,8 +222,8 @@ test('applyOrderUseStream compensation: onJobAborted reverses consume and signal
 
     const mockOrdersModel = {
         async consumeForUse() { return consumedResult; },
-        async unconsumForUse(externalId, orderId) {
-            assert.equal(externalId, 'consumer-3');
+        async unconsumForUse(consumerId, orderId) {
+            assert.equal(consumerId, 'consumer-3');
             assert.equal(orderId, 5);
             unconsumCalled = true;
         }
@@ -235,7 +235,7 @@ test('applyOrderUseStream compensation: onJobAborted reverses consume and signal
         cancel() {}
     };
 
-    const req = { headers: { 'x-user-external-id': 'consumer-3' }, body: { message: 'test' } };
+    const req = { headers: { 'x-user-id': 'consumer-3' }, body: { message: 'test' } };
     const res = makeMockRes();
     const next = () => {};
 
@@ -262,7 +262,7 @@ test('applyOrderUseStream passes error to next() when consume fails before heade
     };
     const mockStreamRouter = { enqueue() {}, cancel() {} };
 
-    const req = { headers: { 'x-user-external-id': 'consumer-4' }, body: { message: 'hi' } };
+    const req = { headers: { 'x-user-id': 'consumer-4' }, body: { message: 'hi' } };
     const res = makeMockRes();
     const errors = [];
     const next = (err) => errors.push(err);

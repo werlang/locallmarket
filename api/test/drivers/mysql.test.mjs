@@ -138,7 +138,7 @@ test('getMySQLDrivers throws when drivers are not initialized', () => {
 
 test('UsersDriver exposes required public methods', () => {
     const driver = new UsersDriver(() => {});
-    const methods = ['createUser', 'getUserById', 'getUserByExternalId', 'listUsers', 'updateUser', 'rechargeCredits', 'deleteUser'];
+    const methods = ['createUser', 'getUserById', 'listUsers', 'updateUser', 'rechargeCredits', 'deleteUser'];
     for (const method of methods) {
         assert.equal(typeof driver[method], 'function', `UsersDriver.${method} should be a function`);
     }
