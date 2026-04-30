@@ -94,6 +94,36 @@ export class Mysql {
     }
 
     /**
+     * Inserts one row and updates selected fields when a unique key conflict happens.
+     * @param {string} table
+     * @param {Record<string, any>} data
+     * @param {{ conflictFields?: string[], updateFields?: string[] }} options
+     */
+    static async upsert(table, data, { conflictFields = [], updateFields = [] } = {}, context = {}) {
+        if (!data || typeof data !== 'object' || Array.isArray(data)) {
+            throw new CustomError('Invalid data for upsert operation.');
+        }
+
+        const columns = Object.keys(data);
+        if (columns.length < 1) {
+            throw new CustomError('No fields provided for upsert operation.');
+        }
+
+        const updatableFields = (updateFields.length > 0 ? updateFields : columns)
+            .filter((field) => !conflictFields.includes(field));
+
+        if (updatableFields.length < 1) {
+            throw new CustomError('No update fields provided for upsert operation.');
+        }
+
+        const sql = `INSERT INTO \`${table}\` (${columns.map((column) => `\`${column}\``).join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`
+            + ` ON DUPLICATE KEY UPDATE ${updatableFields.map((field) => `\`${field}\` = VALUES(\`${field}\`)`).join(', ')}`;
+        const values = columns.map((column) => data[column]);
+
+        return Mysql.#query(sql, values, context);
+    }
+
+    /**
      * Updates rows in the provided table using an id or filter clause.
      */
     static async update(table, data, id, context = {}) {
