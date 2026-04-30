@@ -14,7 +14,7 @@ Core design constraints:
 
 | Service | Folder | Host Port | Responsibility |
 | --- | --- | --- | --- |
-| `api` | `api/` | `80` | Client-facing `GET /ready`, `POST /stream`, queueing, SSE relay, worker WebSocket server |
+| `api` | `api/` | `80` | Client-facing `GET /ready`, `POST /tasks/run`, `GET /workers/pool`, `POST /v1/chat/completions`, queueing, SSE relay, worker WebSocket server |
 | `worker` | `worker/` | not published by compose | Outbound WebSocket client that executes model streams and returns chunk events |
 | MySQL | external | `3306` | Persistent store for users and orders; required when `MYSQL_ENABLED=true` |
 
@@ -22,34 +22,23 @@ Core design constraints:
 
 ### Worker Registration and Binding
 
-1. A provider registers a user account via `POST /users`, which generates a unique `api_key`.
+1. A provider registers a user account via `POST /users/users`, which generates a unique `api_key`.
 2. The worker service connects to the API WebSocket endpoint (`ws://.../ws/workers`) and sends a `worker-register` message with its `workerId` and the user's `api_key` in the payload.
 3. The API validates the API key against the registered user and permanently binds the worker to that user. The binding is immutable: once a worker is bound to a user, the binding cannot be changed, protecting against hijacking attacks under concurrent registration attempts.
 4. Bound workers are recorded in the `workers` table with `user_id` ownership and status tracking (`connected`, `disconnected`).
 
-### Order Creation and Market-Style Matching
+### Stream Task Dispatch
 
-1. With the worker connected and bound, the provider creates orderbook entries via `POST /order` specifying `workerId`, `model`, `price`, and `tps`.
-2. Each order is assigned ownership (`user_id`) and availability status. Orders are initially unmatched and available for consumers.
-3. Orders automatically trigger a **market-style matching flow**: the API finds connected workers owned by the same user (`user_id`), checks for available inventory, and pre-fills matching orders by atomically consuming them and dispatching jobs to available workers.
-4. Matching is race-free: orders are consumed transactionally with `FOR UPDATE` locks, preventing double-consumption and double-debit scenarios.
-5. A consumer registers their own user account and recharges credits via `POST /users/:id/recharge`.
-6. The consumer browses available orders via `GET /orders` (with optional model/price/tps/availability filters).
-7. The consumer calls `POST /workers/:orderid/use` supplying the request `message`. The API:
-   - Validates the order is available and the target worker is connected and owned by the order creator.
-   - Atomically marks the order as consumed and deducts credits from the consumer's account.
-   - Opens an SSE response immediately and dispatches the job to the reserved worker.
-   - Relays `message`, `end`, and `error` events back to the consumer over SSE.
-   - If the targeted worker disconnects while the job is still queued, the order and credits are automatically refunded via a compensating transaction.
+1. A client can submit a direct run task using `POST /tasks/run` with `{ "model", "message" }` (or `input` alias).
+2. The API enqueues the task in `StreamRouter` and starts an SSE response stream.
+3. The router dispatches queued work to a compatible connected worker over `/ws/workers`.
+4. Worker chunk events are relayed back to the HTTP stream (`message`, `end`, `error`).
 
-### Legacy Compatibility
+### OpenAI-Compatible Dispatch
 
-`POST /stream` supports two compatibility modes:
-
-- Legacy mode: no `orderId` in body, requires `{ "model", "message" }`, and enqueues a model-based untargeted stream job.
-- Order-consume mode: body includes `orderId`, then behavior matches `POST /workers/:orderid/use` (consume order, debit credits, targeted worker dispatch).
-
-New consumers should use `POST /workers/:orderid/use`.
+1. A client calls `POST /v1/chat/completions` with bearer API key auth and `stream: true`.
+2. The API resolves the requester identity, finds the first available offer for the requested model, creates/consumes an internal order, and dispatches to the selected worker.
+3. The response is streamed as OpenAI chunk-style SSE and ends with `[DONE]`.
 
 ## API Contract
 
@@ -66,6 +55,25 @@ Returns current API queue depth and worker capacity.
   "queuedJobs": 0
 }
 ```
+
+---
+
+### `GET /workers/pool`
+
+Returns an owner-scoped snapshot of the current worker pool, combining persisted worker bindings/offers with live runtime status.
+
+- Header: `Authorization: Bearer <api_key>`
+- Response `200`: `{ "ok": true, "workers": [...] }`
+- Returns `401` when bearer auth is missing/invalid.
+
+Worker objects include:
+
+- `id`, `userId`
+- `status`, `connected`, `available`, `activeJobId`
+- `model`, `price`, `tps`, `offerId`
+- `connectedAt`, `disconnectedAt`, `lastSeenAt`, `createdAt`, `updatedAt`
+
+This endpoint is visibility-safe by design: it resolves owner identity from API key and only returns workers/offers owned by that user.
 
 ---
 
@@ -95,45 +103,55 @@ On successful registration:
 
 Security: Worker-to-user binding is immutable after initial registration. Duplicate registration attempts for the same `workerId` by different API keys will be rejected, preventing accidental or malicious worker hijacking.
 
+Concurrency safety detail: after upsert, ownership is re-read from persistence and compared with the authenticated user. If ownership does not match, registration is rejected.
+
 ---
 
 ### Users
 
-#### `POST /users`
+Users routes are mounted at `/users`. The current router paths include an extra `/users` segment, so the effective endpoints are `/users/users` and `/users/users/:apiKey/...`.
+
+#### `POST /users/users`
 
 Registers a new user account.
 
 - Request body: `{ "name"?: string, "email"?: string }`
 - Response `201`: `{ "ok": true, "user": { id, name, email, credits, createdAt, updatedAt } }`
 
-#### `GET /users`
+#### `GET /users/users`
 
 Lists all registered users with optional pagination.
 
 - Query params: `limit` (default 50, max 100), `offset` (default 0)
 - Response `200`: `{ "ok": true, "users": [...] }`
 
-#### `GET /users/:id`
+#### `GET /users/users/:apiKey`
 
 Returns a single user profile.
 
 - Response `200`: `{ "ok": true, "user": {...} }` or `404` if not found.
 
-#### `PUT /users/:id`
+#### `PUT /users/users/:apiKey`
 
 Updates mutable user fields (`name`, `email`).
 
 - Request body: `{ "name"?: string, "email"?: string }`
 - Response `200`: `{ "ok": true, "user": {...} }`
 
-#### `POST /users/:id/recharge`
+#### `POST /users/users/:apiKey/recharge`
 
 Adds credits to a user account.
 
 - Request body: `{ "amount": number }` (must be positive)
 - Response `200`: `{ "ok": true, "user": {...} }`
 
-#### `DELETE /users/:id`
+#### `POST /users/users/:apiKey/reset`
+
+Rotates the caller API key.
+
+- Response `200`: `{ "ok": true, "user": {...}, "apiKey": "..." }`
+
+#### `DELETE /users/users/:apiKey`
 
 Deletes a user account and cascades to owned orders.
 
@@ -141,92 +159,32 @@ Deletes a user account and cascades to owned orders.
 
 ---
 
-### Orderbook
+### Stream Tasks
 
-Owner/consumer identity is passed as the `x-user-id` header on owner-scoped and consume routes.
+#### `POST /tasks/run`
 
-#### `POST /order`
+Enqueues a stream task and returns an SSE stream relayed from a connected worker.
 
-Creates a new orderbook entry. Requires the specified worker to be currently connected.
-
-- Header: `x-user-id: <id>`
-- Request body: `{ "workerId": string, "model": string, "price": number, "tps": number }`
-- Response `201`: `{ "ok": true, "order": { id, workerId, model, price, tps, isAvailable, isConsumed, createdAt } }`
-- Returns `422` if the worker is not connected; `400` on invalid payload.
-
-#### `GET /orders`
-
-Public listing of orderbook entries with optional filters.
-
-- Query params: `model`, `minPrice`, `maxPrice`, `minTps`, `maxTps`, `onlyAvailable` (boolean)
-- Response `200`: `{ "ok": true, "orders": [...] }` — runtime `isAvailable` overlays live worker connectivity state.
-
-#### `GET /order/:orderId`
-
-Returns a single owner-scoped order.
-
-- Header: `x-user-id: <id>`
-- Response `200`: `{ "ok": true, "order": {...} }` or `403`/`404` on mismatch.
-
-#### `PUT /order/:orderId`
-
-Updates an owner-scoped order (`model`, `price`, `tps`).
-
-- Header: `x-user-id: <id>`
-- Request body: `{ "model"?: string, "price"?: number, "tps"?: number }`
-- Response `200`: `{ "ok": true, "order": {...} }`
-
-#### `DELETE /order/:orderId`
-
-Deletes an owner-scoped order.
-
-- Header: `x-user-id: <id>`
-- Response `200`: `{ "ok": true }`
+- Request body: `{ "model": string, "message": string }` (`input` is accepted as an alias for `message`)
+- The connection stays open while chunks are streamed (`message`, `end`, `error`).
 
 ---
 
-### Worker Use (Consume)
+### OpenAI-Compatible Streaming
 
-#### `POST /workers/:orderid/use`
+#### `POST /v1/chat/completions`
 
-Consumes an order and streams the worker's model response to the caller via Server-Sent Events.
+OpenAI-compatible streaming route.
 
-- Header: `x-user-id: <consumerId>`
-- Request body: `{ "message": string }` (or `{ "input": string }` compatibility alias)
-- The API atomically marks the order as consumed and deducts the order `price` from the consumer's credits before streaming begins.
-- If the target worker disconnects while the job is still queued, the consumption is reversed and credits are refunded automatically.
-- Returns `400` if the order is not found or already consumed; `402` if the consumer has insufficient credits; `503` if the target worker is unavailable.
-
-Example request:
-
-```sh
-curl --max-time 45 -sS -N \
-  -X POST http://127.0.0.1:3000/workers/42/use \
-  -H 'content-type: application/json' \
-  -H 'x-user-id: user-abc' \
-  --data '{"message":"Reply with OK only."}'
-```
-
-Example SSE stream:
-
-```text
-event: message
-data: OK
-
-event: end
-data: Stream complete.
-```
-
-#### `POST /stream` (legacy)
-
-Compatibility endpoint with dual behavior:
-
-- Legacy mode (no `orderId`): parses `{ "model": string, "message": string }` and enqueues a non-targeted model stream.
-- Order-consume mode (with `orderId`): behaves like `POST /workers/:orderid/use`.
-
-- Request body (legacy mode): `{ "model": string, "message": string }`
-- Request body (order-consume mode): `{ "orderId": string|number, "message": string }`
-- New consumers should use `POST /workers/:orderid/use` instead.
+- Header: `Authorization: Bearer <api_key>`
+- Request body: `{ "model": string, "messages": [...], "stream": true }`
+- Behavior:
+  - Resolves requester identity from bearer API key.
+  - Selects the first available offer for the requested model.
+  - Creates and consumes an internal order, then dispatches to the selected worker.
+  - Streams OpenAI chunk-style SSE output and ends with `[DONE]`.
+  - Uses shared SSE header behavior from `api/helpers/stream.js` (single header policy).
+- Returns `409` when no worker is available for the requested model.
 
 ---
 
@@ -261,7 +219,7 @@ Routes, models, helpers, and middleware must not embed raw SQL. If persistence b
 
 ### Schema Management
 
-MySQL is opt-in. When `MYSQL_ENABLED=false` (the default), the API starts without a database and all user/order routes return `503`. Set `MYSQL_ENABLED=true` and provide connection env vars to enable persistence.
+MySQL is opt-in. When `MYSQL_ENABLED=false` (the default), the API starts without a database and persistence-backed routes (users, workers pool, OpenAI order-backed dispatch) return `503`. Set `MYSQL_ENABLED=true` and provide connection env vars to enable persistence.
 
 Do not create or alter schema at application startup. Apply schema changes through versioned SQL scripts/migrations and run them manually on the target connection.
 
@@ -294,29 +252,32 @@ api/
   package.json
   helpers/
     error.js             # HttpError: HTTP-safe error type
-    orders.js            # Order parse/validate helpers; applyOrderUseStream SSE handler
+    auth.js              # Bearer API key parsing helpers
+    mysql.js             # MySQL driver and SQL confinement boundary
+    orders.js            # Shared payload parsers for task/openai dispatch inputs
     queue.js             # FIFO queue for pending stream jobs
     router.js            # StreamRouter: worker registration, targeted dispatch, job lifecycle
-    stream.js            # HttpStream: SSE response wrapper
+    response.js          # HTTP success response helpers
+    stream.js            # SSE stream helpers and header application
     users.js             # User parse/validate helpers
     wsserver.js          # WSServer: typed WebSocket server for worker messages
   middleware/
     error.js             # JSON error envelope middleware
   models/
-    orders.js            # OrdersModel: orderbook business logic over drivers
+    orders.js            # OrdersModel: offer/order business logic over drivers
     users.js             # UsersModel: user business logic over UsersDriver
+    workers.js           # WorkersModel: worker ownership, visibility, and TPS updates
   routes/
-    orders.js            # /order and /orders resource handlers
-    stream.js            # /stream and /workers/:orderid/use handlers
-    users.js             # /users resource handlers
+    openai.js            # /v1/chat/completions OpenAI-compatible streaming
+    tasks.js             # /tasks/run direct stream task endpoint
+    users.js             # /users/users* account routes
+    workers.js           # /workers/pool owner-scoped worker pool route
   test/
-    helpers/
-      orders.test.mjs    # Parse/validate helpers + applyOrderUseStream route tests
-      router.test.mjs    # StreamRouter targeted dispatch and session-safety tests
-      users.test.mjs     # User parse/validate helper tests
-    models/
-      orders.test.mjs    # OrdersModel business logic + unconsumForUse tests
-      users.test.mjs     # UsersModel business logic tests
+    helpers/             # Helper-level tests (auth/orders/router/users)
+    integration/         # Integration tests for worker binding and stream flows
+    models/              # Model-level tests (orders/users/workers)
+    routes/              # Route tests (openai/tasks/workers)
+    unit/                # Unit tests for shared helpers/middleware
   compose.yaml           # API compose stack; publishes API on host port 80
 
 worker/
@@ -433,5 +394,5 @@ cd api && npm run test:unit
 cd api && npm run test:integration
 ```
 
-The API suite covers: user parse/validate helpers, user model business logic, order parse/validate helpers, `applyOrderUseStream` and legacy `applyLegacyStream` behavior, route-level stream dispatch, `StreamRouter` targeted dispatch and session-safety, MySQL driver public method surface and SQL confinement, and `OrdersModel` consume/unconsume status mapping. All tests pass (72 as of the last verified run; count grows with each feature addition).
+The API suite covers route behavior (`tasks`, `workers/pool`, OpenAI stream), worker registration/binding safety, queue/stream helpers, and model persistence logic (`users`, `orders`, `workers`).
 
