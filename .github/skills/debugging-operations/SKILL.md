@@ -77,7 +77,7 @@ If not present, the worker either cannot reach the API WebSocket URL or the `llm
 wscat -c ws://localhost/ws/workers
 
 # Send a registration message
-{"type":"worker-register","payload":{"workerId":"debug-1","hostname":"local","pid":0}}
+{"type":"worker-register","payload":{"workerId":"debug-1","apiKey":"debug-user-api-key","hostname":"local","pid":0}}
 ```
 
 **Worker reconnect loop**

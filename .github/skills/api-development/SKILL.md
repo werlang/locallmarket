@@ -84,7 +84,7 @@ The worker does **not** expose the LLM port or accept HTTP stream requests. All 
 
 | File | Responsibility |
 |---|---|
-| `worker/helpers/api-client.js` | `ApiStreamClient` — persistent WebSocket connection to API; registers worker; handles job-dispatch messages; calls LLM; sends stream events back; reconnects with exponential backoff |
+| `worker/helpers/api-client.js` | `ApiStreamClient` — persistent WebSocket connection to API; registers worker; handles stream-job messages; calls LLM; sends stream events back; reconnects with exponential backoff |
 | `worker/model/llm.js` | `LLM` — calls LLM model runner via `fetch` SSE; forwards chunks to a `SocketStream`; throws `HttpError` on failure |
 | `worker/routes/system.js` | Express router for `GET /ready` |
 | `worker/helpers/error.js` | `HttpError`, `CustomError` |
@@ -95,14 +95,14 @@ The worker does **not** expose the LLM port or accept HTTP stream requests. All 
 All messages are JSON: `{ "type": "<event>", "payload": { ... } }`.
 
 Worker → API:
-- `worker-register` — `{ workerId, hostname, pid }`
+- `worker-register` — `{ workerId, apiKey, hostname, pid }`
 - `worker-ready` — signals availability after completing a job
 - `stream-event` — `{ jobId, event, data }` (relays LLM output chunk)
 - `job-complete` — `{ jobId }`
 - `job-failed` — `{ jobId, error }`
 
 API → Worker:
-- `job-dispatch` — `{ jobId, message, model }`
+- `stream-job` — `{ jobId, payload: { message, model } }`
 - `worker-ready-request` — broadcast when queue has jobs but no available worker
 
 ## LLM Model Runner
@@ -138,6 +138,33 @@ When adding or modifying Worker behavior:
 4. Add or update tests in `worker/test/unit/` or `worker/test/integration/`.
 5. Run `cd worker && npm test` and confirm all tests pass.
 
+## Market-Style Order Matching
+
+Order matching is a cross-entity concern implemented in `api/helpers/matching.js` via the `OrderMatchingHelper` class.
+
+### When to Add Matching Behavior
+
+1. **Trigger on order mutations**: When `OrdersModel.create()` or `OrdersModel.updateOwn()` complete, invoke `matchingHelper.#triggerMatchingAsync()` to evaluate and apply available matches.
+2. **Trigger on worker availability**: When `StreamRouter.registerWorker()` successfully binds a worker, invoke `matchingHelper.#triggerOrderMatchingAsync()` to match pending orders with the newly available worker.
+3. **Keep triggers async and fire-and-forget**: Do not await matching results in the request handler; use `.catch()` to suppress errors so matching failures do not crash the HTTP response path.
+
+### Matching Flow
+
+1. Matching finds unmatched, available orders owned by a given user.
+2. For each order, `#findAvailableWorkerForOrder()` queries for a connected, available worker owned by the same user (order creator).
+3. If a worker match is found, `#consumeOrderTransaction()` atomically (1) consumes the order, (2) debits the consumer's credits, and (3) locks rows to prevent race conditions.
+4. On successful consumption, `#dispatchJobToWorker()` enqueues the job to the matched worker via `StreamRouter.enqueue()`.
+5. If the job is aborted (e.g., worker disconnects while queued), `unconsumForUse()` rolls back the consumption and refunds credits.
+
+### Ownership Enforcement Patterns
+
+Ownership checks are mandatory at all mutation points to prevent cross-user resource access:
+
+1. **Worker ownership**: Before matching an order with a worker, verify that both the order and the worker are owned by the same user via `StreamRouter.isWorkerOwnedBy(workerId, userId)`.
+2. **Order creation**: Validate that the requested `workerId` exists and is owned by the order creator's `user_id`. Do not allow creating orders with workers from other users.
+3. **Order consumption**: When consuming an order via `POST /workers/:orderId/use`, verify that the consumer's credits are sufficient and that the target worker belongs to the order creator (not the consumer). The order creator acts as the provider; the consumer is a different user.
+4. **Transactional safety**: Use transactional WHERE clauses (e.g., `WHERE is_consumed = 0 AND is_available = 1`) and row-level locks (`FOR UPDATE`) to ensure that double-consumption and double-debit are atomically prevented, not just checked before the mutation.
+
 ## Architecture Guardrails (Mandatory)
 
 1. Never create or patch schema from live application code. Use explicit SQL scripts/migrations only, executed outside app startup.
@@ -145,7 +172,7 @@ When adding or modifying Worker behavior:
 3. If persistence behavior is missing, add a new generic MySQL driver method and call it from models.
 4. Keep MySQL driver logic generic and reusable; do not place business/domain policy in driver methods.
 5. Models are the exclusive owners of entity business logic. Entity business logic must not be implemented in routers, helpers, middleware, or the MySQL driver.
-6. Routers must stay thin (request/response orchestration only). Helpers are limited to cross-entity/non-entity logic such as pricing or worker availability.
+6. Routers must stay thin (request/response orchestration only). Helpers are limited to cross-entity/non-entity logic such as pricing, worker availability, or order matching.
 7. Favor clean current architecture over legacy compatibility patches for this pre-launch project.
 8. When requested to follow references, treat `.github/references/` (especially `api1`) as strict standards.
 

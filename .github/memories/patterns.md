@@ -6,12 +6,12 @@
 - Keep MySQL driver methods business-agnostic.
 - Entity business logic is exclusively owned by models and must not be implemented in routers/helpers/middleware/driver.
 - Helpers are limited to cross-entity/non-entity business logic.
-- For owner-scoped orderbook APIs, resolve identity from `x-user-external-id` in helpers and enforce ownership in model methods before mutating orders.
-- Compute public order availability by combining persisted order state with live worker connectivity/availability from `StreamRouter`.
+- For API-key scoped execution APIs, resolve requester identity from bearer API key and enforce ownership in model transactions before mutating orders or credits.
 - api1-style success envelopes: use `sendSuccess(res, data)` and `sendCreated(res, data)` from `api/helpers/response.js` for all 2xx JSON responses; never build raw `res.json()` response objects in route handlers.
 - All error cases throw or pass `new HttpError(statusCode, message)`; `errorMiddleware` in `api/middleware/error.js` is the sole terminal Express error handler.
-- `POST /stream` is dual-mode: body with `orderId` → `applyOrderUseStream` (consume targeted order); body without `orderId` → `applyLegacyStream` (enqueue via model). Both branches live in `api/routes/stream.js`.
-- Owner identity resolved from `x-user-external-id` request header via helper functions; never extracted inline in route handlers.
+- `POST /tasks/run` remains the direct-run route for simple message/model payloads; OpenAI-compatible streaming uses `POST /v1/chat/completions` with `stream: true`.
+- OpenAI auto-match selection must enforce offer/worker ownership coherence before trusting price metadata to avoid spoofed or stale off-owner offer influence.
+- When removing legacy endpoints/routes, remove or rewrite stale tests that import deleted modules in the same task and verify cleanup with a repository grep.
 - Reference projects for this codebase live at `.github/references/` (api0–api3, skills0–skills1); always inspect the relevant reference before implementing a new API feature.
 - Integration tests that need the API HTTP server use `process.env.PORT = '0'` and `process.env.API_WS_PORT = '0'` before importing `api/app.js` to get OS-assigned ports. The exported `server` reference is used for cleanup (`server.close()`).
 - Worker unit tests isolate network with `FakeSocket` and `FakeWSServer` classes defined inline. API client tests use a minimal fake `WebSocket` with `.send()` and `.readyState` properties. LLM tests mock `global.fetch`.

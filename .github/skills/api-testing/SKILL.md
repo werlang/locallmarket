@@ -199,7 +199,7 @@ When adding new behavior, add tests for:
 | `errorMiddleware` | envelope shape `{ error, status, type, message }`, `data.detail` hidden in production, 500 fallback for unknown errors |
 | `GET /ready` | returns `ok: true` with queue/worker counts |
 | `POST /stream` | 400 for missing message/model, SSE headers on valid request |
-| `ApiStreamClient` | sends `worker-register` on open, `worker-ready` after job, handles `job-dispatch` message, schedules reconnect on close |
+| `ApiStreamClient` | sends `worker-register` on open, `worker-ready` after job, handles `stream-job` message, schedules reconnect on close |
 | `LLM` | parses SSE chunks, sends `end` event on `[DONE]`, wraps errors as `HttpError` |
 
 ## Done Criteria
