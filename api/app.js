@@ -2,11 +2,10 @@ import express from 'express';
 import { HttpError } from './helpers/error.js';
 import { WSServer } from './helpers/wsServer.js';
 import { StreamRouter } from './helpers/router.js';
-import { OrderMatchingHelper } from './helpers/matching.js';
 import { sendSuccess } from './helpers/response.js';
 import { errorMiddleware } from './middleware/error.js';
 import { router as usersRouter } from './routes/users.js';
-import { router as ordersRouter } from './routes/orders.js';
+import { openAiRouterFactory } from './routes/openai.js';
 import { tasksRouterFactory } from './routes/tasks.js';
 import { workersModel } from './models/workers.js';
 import { ordersModel } from './models/orders.js';
@@ -24,19 +23,12 @@ console.log(`WebSocket server listening on ws://${wsHost}:${wsPort}${wsPath}`);
 
 const streamRouter = new StreamRouter({
     wsServer: workerSocketServer,
-    workersModel
-});
-
-// Create the matching helper to wire order-worker matching
-const matchingHelper = new OrderMatchingHelper({
-    streamRouter,
+    workersModel,
     ordersModel
 });
 
 // Wire dependencies
-streamRouter.matchingHelper = matchingHelper;
 ordersModel.streamRouter = streamRouter;
-ordersModel.matchingHelper = matchingHelper;
 
 /**
  * Summarize API readiness and worker capacity for health checks.
@@ -63,7 +55,7 @@ app.get('/ready', (req, res) => {
 
 app.use('/tasks', tasksRouterFactory({ streamRouter }));
 app.use('/users', usersRouter);
-app.use('/orders', ordersRouter);
+app.use('/v1', openAiRouterFactory({ streamRouter }));
 
 app.use((req, res, next) => {
     next(new HttpError(404, 'I am sorry, but I think you are lost.'));
