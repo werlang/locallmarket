@@ -47,6 +47,15 @@ export class WorkersModel {
         });
 
         const worker = await this.getByIdOrNull(workerId);
+        if (!worker) {
+            throw new HttpError(500, 'Worker registration could not be confirmed. Please retry.');
+        }
+
+        // Re-validate owner after persistence to avoid race-condition confusion.
+        if (worker.userId !== owner.id) {
+            throw new HttpError(403, 'Worker identifier already belongs to another user.');
+        }
+
         return {
             worker,
             user: owner

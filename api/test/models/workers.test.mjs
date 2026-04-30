@@ -190,6 +190,52 @@ test('bindConnectedWorker reconnect keeps ownership immutable and only updates l
     assert.equal(result.worker.userId, 'user-1');
 });
 
+test('bindConnectedWorker rejects if ownership changes during concurrent registration race', async () => {
+    let findCalls = 0;
+    const upsertCalls = [];
+
+    const mysql = createMysqlStub({
+        async upsert(table, data, options) {
+            upsertCalls.push({ table, data, options });
+        },
+        async findOne() {
+            findCalls += 1;
+
+            if (findCalls === 1) {
+                return null;
+            }
+
+            return {
+                id: 'worker-race',
+                user_id: 'user-2',
+                status: 'connected',
+                connected_at: '2026-04-30T10:00:00.000Z',
+                disconnected_at: null,
+                last_seen_at: '2026-04-30T10:00:00.000Z',
+                created_at: '2026-04-30T10:00:00.000Z',
+                updated_at: '2026-04-30T10:00:00.000Z'
+            };
+        }
+    });
+
+    const model = new WorkersModel({
+        mysql,
+        users: {
+            async getByApiKeyOrNull() {
+                return { id: 'user-1' };
+            }
+        }
+    });
+
+    await assert.rejects(
+        () => model.bindConnectedWorker({ workerId: 'worker-race', apiKey: 'a'.repeat(64) }),
+        /already belongs to another user/
+    );
+
+    assert.equal(upsertCalls.length, 1);
+    assert.equal(upsertCalls[0].table, 'workers');
+});
+
 test('markDisconnected persists disconnect timestamps by worker id', async () => {
     const updateCalls = [];
     const model = new WorkersModel({
