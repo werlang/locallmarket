@@ -2,15 +2,18 @@ import Queue from './queue.js';
 
 /**
  * Routes queued client stream jobs to the first available worker socket.
+ * Supports automatic order matching when workers connect.
  */
 export class StreamRouter {
 
     /**
-     * @param {{ wsServer: import('./wsserver.js').default }} options
+     * @param {{ wsServer: import('./wsserver.js').default, workersModel?: any, matchingHelper?: import('./matching.js').OrderMatchingHelper }} options
      */
-    constructor({ wsServer }) {
+    constructor({ wsServer, workersModel = null, matchingHelper = null }) {
         this.queue = new Queue();
         this.wsServer = wsServer;
+        this.workersModel = workersModel;
+        this.matchingHelper = matchingHelper;
         this.workers = new Map();
         this.activeJobs = new Map();
 
@@ -23,7 +26,7 @@ export class StreamRouter {
         });
 
         this.wsServer.on('worker-register', (ws, payload) => {
-            this.registerWorker(ws, payload);
+            void this.registerWorker(ws, payload);
         });
 
         this.wsServer.on('worker-ready', (ws) => {
@@ -153,29 +156,79 @@ export class StreamRouter {
     }
 
     /**
-     * Registers or replaces a worker socket under the reported worker identifier.
-     * @param {import('ws').WebSocket & { workerId?: string }} ws
-     * @param {{ workerId?: string }} payload
+     * Checks whether a connected worker belongs to the expected user.
+     * @param {string} workerId
+     * @param {string} userId
+     * @returns {boolean}
      */
-    registerWorker(ws, payload) {
-        const requestedId = typeof payload?.workerId === 'string' && payload.workerId.trim().length > 0
-            ? payload.workerId.trim()
-            : `worker-${this.workers.size + 1}`;
-        const previousWorker = this.workers.get(requestedId);
+    isWorkerOwnedBy(workerId, userId) {
+        if (typeof workerId !== 'string' || workerId.trim().length === 0) {
+            return false;
+        }
+
+        if (typeof userId !== 'string' || userId.trim().length === 0) {
+            return false;
+        }
+
+        const worker = this.workers.get(workerId.trim());
+        return Boolean(worker && worker.ownerId === userId.trim());
+    }
+
+    /**
+     * Registers or replaces a worker socket under the reported worker identifier.
+     * If workersModel is available, binds the worker to a user via API key.
+     * Otherwise, registers the worker locally (for testing/backward compatibility).
+     *
+     * @param {import('ws').WebSocket & { workerId?: string }} ws
+     * @param {{ workerId?: string, apiKey?: string }} payload
+     */
+    async registerWorker(ws, payload) {
+        let boundWorkerId;
+        let ownerUserId;
+
+        // Try to bind worker to user if workersModel is available
+        if (this.workersModel) {
+            try {
+                const binding = await this.workersModel.bindConnectedWorker({
+                    workerId: payload?.workerId,
+                    apiKey: payload?.apiKey
+                });
+                boundWorkerId = binding.worker.id;
+                ownerUserId = binding.user.id;
+            } catch (error) {
+                console.warn(`[${new Date().toISOString()}] Rejected worker registration: ${error?.message || error}`);
+                ws.terminate?.();
+                return;
+            }
+        } else {
+            // Backward compatibility: if no workersModel, just use provided workerId or generate one
+            boundWorkerId = typeof payload?.workerId === 'string' && payload.workerId.trim().length > 0
+                ? payload.workerId.trim()
+                : `worker-${this.workers.size + 1}`;
+            ownerUserId = null;  // No owner binding without workersModel
+        }
+
+        const previousWorker = this.workers.get(boundWorkerId);
 
         if (previousWorker && previousWorker.ws !== ws) {
             previousWorker.ws.terminate?.();
         }
 
-        ws.workerId = requestedId;
+        ws.workerId = boundWorkerId;
         ws.activeJobId = null;
-        this.workers.set(requestedId, {
-            id: requestedId,
+        this.workers.set(boundWorkerId, {
+            id: boundWorkerId,
             ws,
+            ownerId: ownerUserId,
             available: false,
             jobId: null
         });
-        console.log(`[${new Date().toISOString()}] Registered worker ${requestedId}.`);
+        console.log(`[${new Date().toISOString()}] Registered worker ${boundWorkerId}.`);
+
+        // Trigger asynchronous matching for pending orders for this worker (fire-and-forget)
+        if (this.matchingHelper) {
+            this.#triggerOrderMatchingAsync(boundWorkerId);
+        }
 
         this.requestWorkerReady(ws);
     }
@@ -250,6 +303,14 @@ export class StreamRouter {
 
         if (worker) {
             this.workers.delete(workerId);
+        }
+
+        // Mark worker as disconnected in persistence (fire-and-forget, errors logged internally)
+        if (this.workersModel) {
+            this.workersModel.markDisconnected(workerId)
+                .catch((error) => {
+                    console.error(`[${new Date().toISOString()}] Failed to persist worker disconnect for ${workerId}:`, error);
+                });
         }
 
         if (activeJobId) {
@@ -379,9 +440,34 @@ export class StreamRouter {
     }
 
     /**
+     * Asynchronously triggers order matching for a newly registered worker.
+     * Attempts to match and consume pending orders if the worker is available.
+     * Errors are logged but do not propagate (fire-and-forget pattern).
+     *
+     * @param {string} workerId
+     */
+    async #triggerOrderMatchingAsync(workerId) {
+        if (!this.matchingHelper) {
+            return;
+        }
+
+        try {
+            const matches = await this.matchingHelper.matchOrdersForWorker(workerId);
+            if (matches.length > 0) {
+                const successCount = matches.filter((m) => m.status === 'matched').length;
+                if (successCount > 0) {
+                    console.log(`[StreamRouter] Worker ${workerId} matched ${successCount} pending order(s).`);
+                }
+            }
+        } catch (error) {
+            console.error(`[StreamRouter] Failed to match orders for worker ${workerId}:`, error?.message || error);
+        }
+    }
+
+    /**
      * Returns a specific worker when it is connected and currently available.
      * @param {string} workerId
-     * @returns {{ id: string, ws: import('ws').WebSocket, available: boolean, jobId: string | null } | null}
+    * @returns {{ id: string, ws: import('ws').WebSocket, ownerId: string, available: boolean, jobId: string | null } | null}
      */
     getAvailableWorkerById(workerId) {
         const worker = this.workers.get(workerId);
@@ -408,7 +494,7 @@ export class StreamRouter {
     /**
      * Returns the current worker entry for a socket, ignoring stale replaced sessions.
      * @param {import('ws').WebSocket & { workerId?: string }} ws
-     * @returns {{ id: string, ws: import('ws').WebSocket & { activeJobId?: string | null }, available: boolean, jobId: string | null } | null}
+    * @returns {{ id: string, ws: import('ws').WebSocket & { activeJobId?: string | null }, ownerId: string, available: boolean, jobId: string | null } | null}
      */
     getWorkerForSocket(ws) {
         if (!ws.workerId) {

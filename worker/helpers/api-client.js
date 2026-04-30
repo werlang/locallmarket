@@ -1,4 +1,4 @@
-import os from 'node:os';
+import { randomUUID } from 'crypto';
 import { WebSocket } from 'ws';
 import { LLM } from '../model/llm.js';
 
@@ -40,7 +40,7 @@ export class ApiStreamClient {
      */
     constructor({
         url = 'ws://127.0.0.1:3000/ws/workers',
-        workerId = `${os.hostname()}-${process.pid}`,
+        workerId = `worker-${randomUUID()}`,
         apiKey = process.env.WORKER_USER_API_KEY
     } = {}) {
         this.url = url;

@@ -2,11 +2,14 @@ import express from 'express';
 import { HttpError } from './helpers/error.js';
 import { WSServer } from './helpers/wsServer.js';
 import { StreamRouter } from './helpers/router.js';
+import { OrderMatchingHelper } from './helpers/matching.js';
 import { sendSuccess } from './helpers/response.js';
 import { errorMiddleware } from './middleware/error.js';
 import { router as usersRouter } from './routes/users.js';
 import { router as ordersRouter } from './routes/orders.js';
 import { tasksRouterFactory } from './routes/tasks.js';
+import { workersModel } from './models/workers.js';
+import { ordersModel } from './models/orders.js';
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -20,8 +23,20 @@ const workerSocketServer = new WSServer({ port: wsPort, path: wsPath });
 console.log(`WebSocket server listening on ws://${wsHost}:${wsPort}${wsPath}`);
 
 const streamRouter = new StreamRouter({
-    wsServer: workerSocketServer
+    wsServer: workerSocketServer,
+    workersModel
 });
+
+// Create the matching helper to wire order-worker matching
+const matchingHelper = new OrderMatchingHelper({
+    streamRouter,
+    ordersModel
+});
+
+// Wire dependencies
+streamRouter.matchingHelper = matchingHelper;
+ordersModel.streamRouter = streamRouter;
+ordersModel.matchingHelper = matchingHelper;
 
 /**
  * Summarize API readiness and worker capacity for health checks.
