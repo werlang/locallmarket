@@ -6,7 +6,7 @@ import { sendSuccess } from './helpers/response.js';
 import { errorMiddleware } from './middleware/error.js';
 import { router as usersRouter } from './routes/users.js';
 import { router as ordersRouter } from './routes/orders.js';
-import { router as modelsRouter } from './routes/models.js';
+import { tasksRouterFactory } from './routes/tasks.js';
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -46,7 +46,7 @@ app.get('/ready', (req, res) => {
     });
 });
 
-app.use('/models', modelsRouter);
+app.use('/tasks', tasksRouterFactory({ streamRouter }));
 app.use('/users', usersRouter);
 app.use('/orders', ordersRouter);
 

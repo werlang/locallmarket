@@ -3,34 +3,32 @@ import { HttpError } from './error.js';
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 /**
- * Ensures the external user identifier is present and normalized.
- * @param {unknown} value
- * @returns {string}
- */
-export function parseExternalId(value) {
-    if (typeof value !== 'string' || value.trim().length === 0) {
-        throw new HttpError(400, 'externalId must be a non-empty string.');
-    }
-
-    return value.trim();
-}
-
-/**
  * Validates and normalizes payload for user registration.
  * @param {any} body
- * @returns {{ externalId: string, name?: string, email?: string }}
+ * @returns {{ name?: string, email?: string }}
  */
 export function parseCreateUserBody(body) {
     const payload = body || {};
-    const externalId = parseExternalId(payload.externalId);
     const name = normalizeOptionalString(payload.name, 'name');
     const email = normalizeOptionalEmail(payload.email);
 
     return {
-        externalId,
         ...(name !== undefined ? { name } : {}),
         ...(email !== undefined ? { email } : {})
     };
+}
+
+/**
+ * Validates a user id path parameter.
+ * @param {unknown} value
+ * @returns {string}
+ */
+export function parseUserId(value) {
+    if (typeof value !== 'string' || value.trim().length === 0) {
+        throw new HttpError(400, 'userId must be a non-empty string.');
+    }
+
+    return value.trim();
 }
 
 /**

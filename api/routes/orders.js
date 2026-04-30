@@ -5,7 +5,7 @@ import {
     parseCreateOrderBody,
     parseListOrdersQuery,
     parseOrderId,
-    parseOwnerExternalIdHeader,
+    parseOwnerIdHeader,
     parseUpdateOrderBody
 } from '../helpers/orders.js';
 
@@ -13,9 +13,9 @@ export const router = express.Router();
 
 router.post('/order', async (req, res, next) => {
     try {
-        const ownerExternalId = parseOwnerExternalIdHeader(req.headers);
+        const ownerId = parseOwnerIdHeader(req.headers);
         const payload = parseCreateOrderBody(req.body);
-        const order = await ordersModel.create(ownerExternalId, payload);
+        const order = await ordersModel.create(ownerId, payload);
 
         return sendCreated(res, { body: { order } });
     } catch (error) {
@@ -36,9 +36,9 @@ router.get('/orders', async (req, res, next) => {
 
 router.get('/order/:orderId', async (req, res, next) => {
     try {
-        const ownerExternalId = parseOwnerExternalIdHeader(req.headers);
+        const ownerId = parseOwnerIdHeader(req.headers);
         const orderId = parseOrderId(req.params.orderId);
-        const order = await ordersModel.getOwnById(ownerExternalId, orderId);
+        const order = await ordersModel.getOwnById(ownerId, orderId);
 
         return sendSuccess(res, { body: { order } });
     } catch (error) {
@@ -48,10 +48,10 @@ router.get('/order/:orderId', async (req, res, next) => {
 
 router.put('/order/:orderId', async (req, res, next) => {
     try {
-        const ownerExternalId = parseOwnerExternalIdHeader(req.headers);
+        const ownerId = parseOwnerIdHeader(req.headers);
         const orderId = parseOrderId(req.params.orderId);
         const payload = parseUpdateOrderBody(req.body);
-        const order = await ordersModel.updateOwn(ownerExternalId, orderId, payload);
+        const order = await ordersModel.updateOwn(ownerId, orderId, payload);
 
         return sendSuccess(res, { body: { order } });
     } catch (error) {
@@ -61,9 +61,9 @@ router.put('/order/:orderId', async (req, res, next) => {
 
 router.delete('/order/:orderId', async (req, res, next) => {
     try {
-        const ownerExternalId = parseOwnerExternalIdHeader(req.headers);
+        const ownerId = parseOwnerIdHeader(req.headers);
         const orderId = parseOrderId(req.params.orderId);
-        await ordersModel.deleteOwn(ownerExternalId, orderId);
+        await ordersModel.deleteOwn(ownerId, orderId);
 
         return sendSuccess(res);
     } catch (error) {

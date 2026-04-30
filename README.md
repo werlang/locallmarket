@@ -25,7 +25,7 @@ Core design constraints:
 1. A provider registers a user account via `POST /users`.
 2. The provider connects a worker to the API WebSocket (`ws://.../ws/workers`).
 3. With the worker connected, the provider creates an orderbook entry via `POST /order` specifying `workerId`, `model`, `price`, and `tps`.
-4. A consumer registers their own user account and recharges credits via `POST /users/:externalId/recharge`.
+4. A consumer registers their own user account and recharges credits via `POST /users/:id/recharge`.
 5. The consumer browses available orders via `GET /orders` (with optional model/price/tps/availability filters).
 6. The consumer calls `POST /workers/:orderid/use` supplying the request `message`. The API:
    - Validates the order is available and the target worker is connected.
@@ -67,8 +67,8 @@ Returns current API queue depth and worker capacity.
 
 Registers a new user account.
 
-- Request body: `{ "externalId": string, "name"?: string, "email"?: string }`
-- Response `201`: `{ "ok": true, "user": { id, externalId, name, email, credits, createdAt, updatedAt } }`
+- Request body: `{ "name"?: string, "email"?: string }`
+- Response `201`: `{ "ok": true, "user": { id, name, email, credits, createdAt, updatedAt } }`
 
 #### `GET /users`
 
@@ -77,27 +77,27 @@ Lists all registered users with optional pagination.
 - Query params: `limit` (default 50, max 100), `offset` (default 0)
 - Response `200`: `{ "ok": true, "users": [...] }`
 
-#### `GET /users/:externalId`
+#### `GET /users/:id`
 
 Returns a single user profile.
 
 - Response `200`: `{ "ok": true, "user": {...} }` or `404` if not found.
 
-#### `PUT /users/:externalId`
+#### `PUT /users/:id`
 
 Updates mutable user fields (`name`, `email`).
 
 - Request body: `{ "name"?: string, "email"?: string }`
 - Response `200`: `{ "ok": true, "user": {...} }`
 
-#### `POST /users/:externalId/recharge`
+#### `POST /users/:id/recharge`
 
 Adds credits to a user account.
 
 - Request body: `{ "amount": number }` (must be positive)
 - Response `200`: `{ "ok": true, "user": {...} }`
 
-#### `DELETE /users/:externalId`
+#### `DELETE /users/:id`
 
 Deletes a user account and cascades to owned orders.
 
@@ -107,13 +107,13 @@ Deletes a user account and cascades to owned orders.
 
 ### Orderbook
 
-Owner/consumer identity is passed as the `x-user-external-id` header on owner-scoped and consume routes.
+Owner/consumer identity is passed as the `x-user-id` header on owner-scoped and consume routes.
 
 #### `POST /order`
 
 Creates a new orderbook entry. Requires the specified worker to be currently connected.
 
-- Header: `x-user-external-id: <externalId>`
+- Header: `x-user-id: <id>`
 - Request body: `{ "workerId": string, "model": string, "price": number, "tps": number }`
 - Response `201`: `{ "ok": true, "order": { id, workerId, model, price, tps, isAvailable, isConsumed, createdAt } }`
 - Returns `422` if the worker is not connected; `400` on invalid payload.
@@ -129,14 +129,14 @@ Public listing of orderbook entries with optional filters.
 
 Returns a single owner-scoped order.
 
-- Header: `x-user-external-id: <externalId>`
+- Header: `x-user-id: <id>`
 - Response `200`: `{ "ok": true, "order": {...} }` or `403`/`404` on mismatch.
 
 #### `PUT /order/:orderId`
 
 Updates an owner-scoped order (`model`, `price`, `tps`).
 
-- Header: `x-user-external-id: <externalId>`
+- Header: `x-user-id: <id>`
 - Request body: `{ "model"?: string, "price"?: number, "tps"?: number }`
 - Response `200`: `{ "ok": true, "order": {...} }`
 
@@ -144,7 +144,7 @@ Updates an owner-scoped order (`model`, `price`, `tps`).
 
 Deletes an owner-scoped order.
 
-- Header: `x-user-external-id: <externalId>`
+- Header: `x-user-id: <id>`
 - Response `200`: `{ "ok": true }`
 
 ---
@@ -155,7 +155,7 @@ Deletes an owner-scoped order.
 
 Consumes an order and streams the worker's model response to the caller via Server-Sent Events.
 
-- Header: `x-user-external-id: <consumerExternalId>`
+- Header: `x-user-id: <consumerId>`
 - Request body: `{ "message": string }` (or `{ "input": string }` compatibility alias)
 - The API atomically marks the order as consumed and deducts the order `price` from the consumer's credits before streaming begins.
 - If the target worker disconnects while the job is still queued, the consumption is reversed and credits are refunded automatically.
@@ -167,7 +167,7 @@ Example request:
 curl --max-time 45 -sS -N \
   -X POST http://127.0.0.1:3000/workers/42/use \
   -H 'content-type: application/json' \
-  -H 'x-user-external-id: user-abc' \
+  -H 'x-user-id: user-abc' \
   --data '{"message":"Reply with OK only."}'
 ```
 

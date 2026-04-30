@@ -6,11 +6,11 @@ import { HttpStream } from './stream.js';
  * @param {Record<string, unknown>} headers
  * @returns {string}
  */
-export function parseOwnerExternalIdHeader(headers) {
-    const raw = headers?.['x-user-external-id'];
+export function parseOwnerIdHeader(headers) {
+    const raw = headers?.['x-user-id'];
 
     if (typeof raw !== 'string' || raw.trim().length === 0) {
-        throw new HttpError(401, 'x-user-external-id header is required.');
+        throw new HttpError(401, 'x-user-id header is required.');
     }
 
     return raw.trim();
@@ -288,98 +288,4 @@ function parseOptionalBoolean(value, fallback) {
     }
 
     throw new HttpError(400, 'Boolean fields must be true/false.');
-}
-
-/**
- * Shared order-consume streaming flow for worker-use and legacy stream routes.
- * Consumes the order atomically (debit credits), opens an SSE stream, and enqueues a
- * targeted dispatch job to the order's worker. If the worker disconnects while the job is
- * still queued (never dispatched), the consume is reversed via a compensating refund.
- *
- * @param {{
- *   req: import('express').Request,
- *   res: import('express').Response,
- *   next: import('express').NextFunction,
- *   orderIdRaw: unknown,
- *   ordersModel: import('../models/orders.js').OrdersModel,
- *   streamRouter: import('./router.js').StreamRouter
- * }} options
- */
-export async function applyOrderUseStream({ req, res, next, orderIdRaw, ordersModel, streamRouter }) {
-    let stream;
-
-    try {
-        const consumerExternalId = parseOwnerExternalIdHeader(req.headers);
-        const orderId = parseOrderId(orderIdRaw);
-        const streamBody = parseUseWorkerBody(req.body);
-        const consumed = await ordersModel.consumeForUse(consumerExternalId, orderId);
-
-        stream = new HttpStream(res);
-        const jobId = streamRouter.enqueue({
-            payload: {
-                message: streamBody.message,
-                model: consumed.order.model
-            },
-            stream,
-            targetWorkerId: consumed.order.workerId,
-            onJobAborted: async () => {
-                console.error(`[applyOrderUseStream] Queued job aborted for order ${orderId}. Compensating consume...`);
-                try {
-                    await ordersModel.unconsumForUse(consumerExternalId, orderId);
-                } catch (refundError) {
-                    console.error('[applyOrderUseStream] Compensation refund failed:', refundError);
-                }
-
-                if (!stream.closed) {
-                    stream.event('error').send(JSON.stringify({ error: 'Worker disconnected before processing. Order has been refunded.' }));
-                    stream.close();
-                }
-            }
-        });
-
-        res.once('close', () => {
-            streamRouter.cancel(jobId);
-        });
-    } catch (error) {
-        if (res.headersSent) {
-            stream?.event('error').send(JSON.stringify({ error: error?.message || 'Invalid request.' }));
-            stream?.close();
-            return;
-        }
-
-        next(error);
-    }
-}
-
-/**
- * Legacy /stream compatibility flow.
- * Keeps the pre-orderbook behavior by enqueuing a non-targeted job with the provided model, without an explicit consume step.
- * @param {{
- *   req: import('express').Request,
- *   res: import('express').Response,
- *   next: import('express').NextFunction,
- *   streamRouter: import('./router.js').StreamRouter
- * }} options
- */
-export async function applyLegacyStream({ req, res, next, streamRouter }) {
-    let stream;
-
-    try {
-        const payload = parseLegacyStreamBody(req.body);
-        stream = new HttpStream(res);
-
-        const jobId = streamRouter.enqueue({ payload, stream });
-
-        res.once('close', () => {
-            streamRouter.cancel(jobId);
-        });
-    } catch (error) {
-        if (res.headersSent) {
-            stream?.event('error').send(JSON.stringify({ error: error?.message || 'Invalid request.' }));
-            stream?.close();
-            return;
-        }
-
-        next(error);
-    }
 }

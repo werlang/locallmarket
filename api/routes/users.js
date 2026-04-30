@@ -3,7 +3,7 @@ import { sendCreated, sendSuccess } from '../helpers/response.js';
 import { usersModel } from '../models/users.js';
 import {
     parseCreateUserBody,
-    parseExternalId,
+    parseUserId,
     parseListUsersQuery,
     parseRechargeBody,
     parseUpdateUserBody
@@ -33,10 +33,10 @@ router.get('/users', async (req, res, next) => {
     }
 });
 
-router.get('/users/:externalId', async (req, res, next) => {
+router.get('/users/:id', async (req, res, next) => {
     try {
-        const externalId = parseExternalId(req.params.externalId);
-        const user = await usersModel.getByExternalId(externalId);
+        const id = parseUserId(req.params.id);
+        const user = await usersModel.getById(id);
 
         return sendSuccess(res, { body: { user } });
     } catch (error) {
@@ -44,11 +44,11 @@ router.get('/users/:externalId', async (req, res, next) => {
     }
 });
 
-router.put('/users/:externalId', async (req, res, next) => {
+router.put('/users/:id', async (req, res, next) => {
     try {
-        const externalId = parseExternalId(req.params.externalId);
+        const id = parseUserId(req.params.id);
         const payload = parseUpdateUserBody(req.body);
-        const user = await usersModel.updateByExternalId(externalId, payload);
+        const user = await usersModel.updateById(id, payload);
 
         return sendSuccess(res, { body: { user } });
     } catch (error) {
@@ -56,11 +56,11 @@ router.put('/users/:externalId', async (req, res, next) => {
     }
 });
 
-router.post('/users/:externalId/recharge', async (req, res, next) => {
+router.post('/users/:id/recharge', async (req, res, next) => {
     try {
-        const externalId = parseExternalId(req.params.externalId);
+        const id = parseUserId(req.params.id);
         const amount = parseRechargeBody(req.body);
-        const user = await usersModel.rechargeByExternalId(externalId, amount);
+        const user = await usersModel.rechargeById(id, amount);
 
         return sendSuccess(res, { body: { user } });
     } catch (error) {
@@ -68,10 +68,10 @@ router.post('/users/:externalId/recharge', async (req, res, next) => {
     }
 });
 
-router.delete('/users/:externalId', async (req, res, next) => {
+router.delete('/users/:id', async (req, res, next) => {
     try {
-        const externalId = parseExternalId(req.params.externalId);
-        await usersModel.deleteByExternalId(externalId);
+        const id = parseUserId(req.params.id);
+        await usersModel.deleteById(id);
 
         return sendSuccess(res);
     } catch (error) {

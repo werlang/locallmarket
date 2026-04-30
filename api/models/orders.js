@@ -15,15 +15,15 @@ export class OrdersModel {
 
     /**
      * Creates an order under the requester ownership after validating worker connectivity.
-     * @param {string} ownerExternalId
+     * @param {string} ownerId
      * @param {{ workerId: string, model: string, price: number, tps: number, isAvailable: boolean }} input
      */
-    async create(ownerExternalId, input) {
+    async create(ownerId, input) {
         if (!this.streamRouter.isWorkerConnected(input.workerId)) {
             throw new HttpError(409, 'workerId must reference a currently connected worker.');
         }
 
-        const owner = await this.getOwner(ownerExternalId);
+        const owner = await this.getOwner(ownerId);
         const [result] = await Mysql.insert('orders', {
             user_id: owner.id,
             worker_id: input.workerId,
@@ -39,22 +39,22 @@ export class OrdersModel {
 
     /**
      * Returns a single owner-scoped order.
-     * @param {string} ownerExternalId
+     * @param {string} ownerId
      * @param {number} orderId
      */
-    async getOwnById(ownerExternalId, orderId) {
-        const { order } = await this.getOwnedOrder(ownerExternalId, orderId);
+    async getOwnById(ownerId, orderId) {
+        const { order } = await this.getOwnedOrder(ownerId, orderId);
         return order;
     }
 
     /**
      * Updates an owner-scoped order and validates worker connection when workerId changes.
-     * @param {string} ownerExternalId
+     * @param {string} ownerId
      * @param {number} orderId
      * @param {{ workerId?: string, model?: string, price?: number, tps?: number, isAvailable?: boolean }} updates
      */
-    async updateOwn(ownerExternalId, orderId, updates) {
-        const { order } = await this.getOwnedOrder(ownerExternalId, orderId);
+    async updateOwn(ownerId, orderId, updates) {
+        const { order } = await this.getOwnedOrder(ownerId, orderId);
 
         if (updates.workerId && !this.streamRouter.isWorkerConnected(updates.workerId)) {
             throw new HttpError(409, 'workerId must reference a currently connected worker.');
@@ -78,20 +78,20 @@ export class OrdersModel {
 
     /**
      * Deletes an owner-scoped order.
-     * @param {string} ownerExternalId
+     * @param {string} ownerId
      * @param {number} orderId
      */
-    async deleteOwn(ownerExternalId, orderId) {
-        const { order } = await this.getOwnedOrder(ownerExternalId, orderId);
+    async deleteOwn(ownerId, orderId) {
+        const { order } = await this.getOwnedOrder(ownerId, orderId);
         await Mysql.delete('orders', order.id);
     }
 
     /**
      * Consumes a public order for a user and debits credits atomically by order price.
-     * @param {string} consumerExternalId
+     * @param {string} consumerId
      * @param {number} orderId
      */
-    async consumeForUse(consumerExternalId, orderId) {
+    async consumeForUse(consumerId, orderId) {
         const order = await this.getOrderById(orderId);
 
         if (!order) {
@@ -114,7 +114,7 @@ export class OrdersModel {
             throw new HttpError(409, 'Order worker is busy and cannot be consumed right now.');
         }
 
-        const result = await this.consumeOrderTransaction({ orderId, consumerExternalId });
+        const result = await this.consumeOrderTransaction({ orderId, consumerId });
 
         if (result.status === 'consumer_not_found') {
             throw new HttpError(404, 'Consumer user not found.');
@@ -214,16 +214,16 @@ export class OrdersModel {
     }
 
     /**
-     * @param {string} ownerExternalId
+     * @param {string} id
      */
-    async getOwner(ownerExternalId) {
+    async getOwner(id) {
         const users = await Mysql.find('users', {
-            filter: { external_id: ownerExternalId },
-            view: ['id', 'external_id'],
+            filter: { id },
+            view: ['id'],
             opt: { limit: 1 }
         });
         const owner = users[0]
-            ? { id: Number(users[0].id), externalId: users[0].external_id }
+            ? { id: users[0].id }
             : null;
 
         if (!owner) {
@@ -236,11 +236,11 @@ export class OrdersModel {
     /**
      * Compensating refund: reverses a prior consume and restores credits when dispatch is aborted.
      * A 'not_consumed' outcome is treated as a no-op so the method is idempotent.
-     * @param {string} consumerExternalId
+     * @param {string} consumerId
      * @param {number} orderId
      */
-    async unconsumForUse(consumerExternalId, orderId) {
-        const result = await this.unconsumeOrderTransaction({ orderId, consumerExternalId });
+    async unconsumForUse(consumerId, orderId) {
+        const result = await this.unconsumeOrderTransaction({ orderId, consumerId });
 
         if (result.status === 'order_not_found') {
             throw new HttpError(404, 'Order not found during compensation.');
@@ -254,29 +254,28 @@ export class OrdersModel {
     }
 
     /**
-     * @param {string} ownerExternalId
+     * @param {string} userId
      * @param {number} orderId
      */
-    async getOwnedOrder(ownerExternalId, orderId) {
-        const owner = await this.getOwner(ownerExternalId);
+    async getOwnedOrder(userId, orderId) {
         const order = await this.getOrderById(orderId);
 
         if (!order) {
             throw new HttpError(404, 'Order not found.');
         }
 
-        if (Number(order.userId) !== Number(owner.id)) {
+        if (order.userId !== userId) {
             throw new HttpError(403, 'You can only mutate your own orders.');
         }
 
-        return { owner, order };
+        return { owner: { id: userId }, order };
     }
 
     /**
      * @param {number} orderId
      */
     async getOrderById(orderId) {
-        const orders = await Mysql.find('orders', {
+        const order = await Mysql.findOne('orders', {
             filter: { id: orderId },
             view: [
                 'id',
@@ -294,172 +293,212 @@ export class OrdersModel {
             opt: { limit: 1 }
         });
 
-        return orders[0] ? mapOrderRow(orders[0]) : null;
+        return order ? mapOrderRow(order) : null;
     }
 
     /**
-     * @param {{ orderId: number, consumerExternalId: string }} input
+     * @param {{ orderId: number, consumerId: string }} input
      */
-    async consumeOrderTransaction({ orderId, consumerExternalId }) {
-        await Mysql.connect();
-        const connection = await Mysql.connection.getConnection();
+    async consumeOrderTransaction({ orderId, consumerId }) {
+        const transactionResult = await Mysql.withTransaction(async (connection) => {
+            const consumerRow = await Mysql.findOne('users', {
+                filter: { id: consumerId },
+                view: ['id', 'credits'],
+                opt: { limit: 1, forUpdate: true }
+            }, { connection });
 
-        try {
-            await connection.beginTransaction();
-
-            const [consumerRows] = await connection.execute(
-                'SELECT id, external_id, credits FROM users WHERE external_id = ? FOR UPDATE',
-                [consumerExternalId]
-            );
-
-            if (!consumerRows[0]) {
-                await connection.rollback();
+            if (!consumerRow) {
                 return { status: 'consumer_not_found' };
             }
 
-            const [orderRows] = await connection.execute(
-                'SELECT id, user_id, worker_id, model, price, tps, is_available, is_consumed, consumed_at, created_at, updated_at FROM orders WHERE id = ? FOR UPDATE',
-                [orderId]
-            );
+            const orderRow = await Mysql.findOne('orders', {
+                filter: { id: orderId },
+                view: [
+                    'id',
+                    'user_id',
+                    'worker_id',
+                    'model',
+                    'price',
+                    'tps',
+                    'is_available',
+                    'is_consumed',
+                    'consumed_at',
+                    'created_at',
+                    'updated_at'
+                ],
+                opt: { limit: 1, forUpdate: true }
+            }, { connection });
 
-            if (!orderRows[0]) {
-                await connection.rollback();
+            if (!orderRow) {
                 return { status: 'order_not_found' };
             }
 
-            const order = mapOrderRow(orderRows[0]);
+            const order = mapOrderRow(orderRow);
             const consumer = {
-                id: Number(consumerRows[0].id),
-                externalId: consumerRows[0].external_id,
-                credits: Number(consumerRows[0].credits)
+                id: consumerRow.id,
+                credits: Number(consumerRow.credits)
             };
 
             if (order.isConsumed) {
-                await connection.rollback();
                 return { status: 'already_consumed' };
             }
 
             if (!order.isAvailable) {
-                await connection.rollback();
                 return { status: 'order_unavailable' };
             }
 
             if (consumer.credits < order.price) {
-                await connection.rollback();
                 return { status: 'insufficient_credits' };
             }
 
-            await connection.execute(
-                'UPDATE users SET credits = credits - ? WHERE id = ?',
-                [order.price, consumer.id]
-            );
-
-            const [consumeResult] = await connection.execute(
-                'UPDATE orders SET is_consumed = 1, is_available = 0, consumed_at = NOW() WHERE id = ? AND is_consumed = 0 AND is_available = 1',
-                [order.id]
+            const consumeResult = await Mysql.update(
+                'orders',
+                {
+                    is_consumed: 1,
+                    is_available: 0,
+                    consumed_at: Mysql.raw('NOW()')
+                },
+                {
+                    id: order.id,
+                    is_consumed: 0,
+                    is_available: 1
+                },
+                { connection }
             );
 
             if (!consumeResult || consumeResult.affectedRows < 1) {
-                await connection.rollback();
                 return { status: 'already_consumed' };
             }
 
-            await connection.commit();
-
-            const consumedOrder = await this.getOrderById(order.id);
-            const [updatedConsumerRows] = await Mysql.connection.execute(
-                'SELECT id, external_id, credits FROM users WHERE id = ?',
-                [consumer.id]
-            );
-            const updatedConsumer = {
-                id: Number(updatedConsumerRows[0].id),
-                externalId: updatedConsumerRows[0].external_id,
-                credits: Number(updatedConsumerRows[0].credits)
-            };
+            await Mysql.update('users', {
+                credits: { dec: order.price }
+            }, consumer.id, { connection });
 
             return {
                 status: 'consumed',
-                order: consumedOrder,
-                consumer: updatedConsumer
+                orderId: order.id,
+                consumerId: consumer.id
             };
-        } catch (error) {
-            await connection.rollback();
-            throw error;
-        } finally {
-            connection.release();
+        });
+
+        if (transactionResult.status !== 'consumed') {
+            return transactionResult;
         }
+
+        const consumedOrder = await this.getOrderById(transactionResult.orderId);
+        const updatedConsumerRow = await Mysql.findOne('users', {
+            filter: { id: transactionResult.consumerId },
+            view: ['id', 'credits'],
+            opt: { limit: 1 }
+        });
+        const updatedConsumer = {
+            id: updatedConsumerRow.id,
+            credits: Number(updatedConsumerRow.credits)
+        };
+
+        return {
+            status: 'consumed',
+            order: consumedOrder,
+            consumer: updatedConsumer
+        };
     }
 
     /**
-     * @param {{ orderId: number, consumerExternalId: string }} input
+     * @param {{ orderId: number, consumerId: string }} input
      */
-    async unconsumeOrderTransaction({ orderId, consumerExternalId }) {
-        await Mysql.connect();
-        const connection = await Mysql.connection.getConnection();
+    async unconsumeOrderTransaction({ orderId, consumerId }) {
+        const transactionResult = await Mysql.withTransaction(async (connection) => {
+            const consumerRow = await Mysql.findOne('users', {
+                filter: { id: consumerId },
+                view: ['id', 'credits'],
+                opt: { limit: 1, forUpdate: true }
+            }, { connection });
 
-        try {
-            await connection.beginTransaction();
-
-            const [consumerRows] = await connection.execute(
-                'SELECT id, external_id, credits FROM users WHERE external_id = ? FOR UPDATE',
-                [consumerExternalId]
-            );
-            if (!consumerRows[0]) {
-                await connection.rollback();
+            if (!consumerRow) {
                 return { status: 'consumer_not_found' };
             }
 
-            const [orderRows] = await connection.execute(
-                'SELECT id, user_id, worker_id, model, price, tps, is_available, is_consumed, consumed_at, created_at, updated_at FROM orders WHERE id = ? FOR UPDATE',
-                [orderId]
-            );
-            if (!orderRows[0]) {
-                await connection.rollback();
+            const orderRow = await Mysql.findOne('orders', {
+                filter: { id: orderId },
+                view: [
+                    'id',
+                    'user_id',
+                    'worker_id',
+                    'model',
+                    'price',
+                    'tps',
+                    'is_available',
+                    'is_consumed',
+                    'consumed_at',
+                    'created_at',
+                    'updated_at'
+                ],
+                opt: { limit: 1, forUpdate: true }
+            }, { connection });
+
+            if (!orderRow) {
                 return { status: 'order_not_found' };
             }
 
-            const order = mapOrderRow(orderRows[0]);
+            const order = mapOrderRow(orderRow);
             const consumer = {
-                id: Number(consumerRows[0].id),
-                externalId: consumerRows[0].external_id,
-                credits: Number(consumerRows[0].credits)
+                id: consumerRow.id,
+                credits: Number(consumerRow.credits)
             };
 
             if (!order.isConsumed) {
-                await connection.rollback();
                 return { status: 'not_consumed' };
             }
 
-            await connection.execute('UPDATE users SET credits = credits + ? WHERE id = ?', [order.price, consumer.id]);
-            await connection.execute(
-                'UPDATE orders SET is_consumed = 0, is_available = 1, consumed_at = NULL WHERE id = ? AND is_consumed = 1',
-                [order.id]
+            const restoreResult = await Mysql.update(
+                'orders',
+                {
+                    is_consumed: 0,
+                    is_available: 1,
+                    consumed_at: null
+                },
+                {
+                    id: order.id,
+                    is_consumed: 1
+                },
+                { connection }
             );
 
-            await connection.commit();
+            if (!restoreResult || restoreResult.affectedRows < 1) {
+                return { status: 'not_consumed' };
+            }
 
-            const restoredOrder = await this.getOrderById(order.id);
-            const [updatedConsumerRows] = await Mysql.connection.execute(
-                'SELECT id, external_id, credits FROM users WHERE id = ?',
-                [consumer.id]
-            );
-            const updatedConsumer = {
-                id: Number(updatedConsumerRows[0].id),
-                externalId: updatedConsumerRows[0].external_id,
-                credits: Number(updatedConsumerRows[0].credits)
-            };
+            await Mysql.update('users', {
+                credits: { inc: order.price }
+            }, consumer.id, { connection });
 
             return {
                 status: 'restored',
-                order: restoredOrder,
-                consumer: updatedConsumer
+                orderId: order.id,
+                consumerId: consumer.id
             };
-        } catch (error) {
-            await connection.rollback();
-            throw error;
-        } finally {
-            connection.release();
+        });
+
+        if (transactionResult.status !== 'restored') {
+            return transactionResult;
         }
+
+        const restoredOrder = await this.getOrderById(transactionResult.orderId);
+        const updatedConsumerRow = await Mysql.findOne('users', {
+            filter: { id: transactionResult.consumerId },
+            view: ['id', 'credits'],
+            opt: { limit: 1 }
+        });
+        const updatedConsumer = {
+            id: updatedConsumerRow.id,
+            credits: Number(updatedConsumerRow.credits)
+        };
+
+        return {
+            status: 'restored',
+            order: restoredOrder,
+            consumer: updatedConsumer
+        };
     }
 }
 
@@ -483,7 +522,7 @@ export const ordersModel = new OrdersModel();
 function mapOrderRow(row) {
     return {
         id: Number(row.id),
-        userId: Number(row.user_id),
+        userId: row.user_id,
         workerId: row.worker_id,
         model: row.model,
         price: Number(row.price),

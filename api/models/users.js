@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import { HttpError } from '../helpers/error.js';
 import { Mysql } from '../helpers/mysql.js';
 
@@ -6,23 +7,19 @@ import { Mysql } from '../helpers/mysql.js';
  */
 export class UsersModel {
     /**
-     * Registers a new API user by external identifier.
-     * @param {{ externalId: string, name?: string, email?: string }} input
+     * Registers a new API user with an auto-generated UUID primary key.
+     * @param {{ name?: string, email?: string }} input
      */
     async register(input) {
-        const existing = await this.getByExternalIdOrNull(input.externalId);
-        if (existing) {
-            throw new HttpError(409, 'A user with this externalId already exists.');
-        }
-
         try {
+            const id = randomUUID();
             const record = {
-                external_id: input.externalId,
+                id,
                 ...(input.name !== undefined ? { name: input.name } : {}),
                 ...(input.email !== undefined ? { email: input.email } : {})
             };
-            const [result] = await Mysql.insert('users', record);
-            return this.getById(result.insertId);
+            await Mysql.insert('users', record);
+            return this.getByIdOrNull(id);
         } catch (error) {
             if (isDuplicateEntryError(error)) {
                 throw new HttpError(409, 'A user with this identity already exists.');
@@ -33,11 +30,11 @@ export class UsersModel {
     }
 
     /**
-     * Gets a user profile by external identifier.
-     * @param {string} externalId
+     * Gets a user profile by id, throwing 404 if not found.
+     * @param {string} id
      */
-    async getByExternalId(externalId) {
-        const user = await this.getByExternalIdOrNull(externalId);
+    async getById(id) {
+        const user = await this.getByIdOrNull(id);
         if (!user) {
             throw new HttpError(404, 'User not found.');
         }
@@ -53,7 +50,6 @@ export class UsersModel {
         const users = await Mysql.find('users', {
             view: [
                 'id',
-                'external_id',
                 'name',
                 'email',
                 'credits',
@@ -72,11 +68,11 @@ export class UsersModel {
 
     /**
      * Updates mutable user profile fields.
-     * @param {string} externalId
+     * @param {string} id
      * @param {{ name?: string, email?: string }} input
      */
-    async updateByExternalId(externalId, input) {
-        const user = await this.getByExternalId(externalId);
+    async updateById(id, input) {
+        const user = await this.getById(id);
         const updateData = {
             ...(input.name !== undefined ? { name: input.name } : {}),
             ...(input.email !== undefined ? { email: input.email } : {})
@@ -84,7 +80,7 @@ export class UsersModel {
 
         try {
             await Mysql.update('users', updateData, user.id);
-            return this.getById(user.id);
+            return this.getByIdOrNull(user.id);
         } catch (error) {
             if (isDuplicateEntryError(error)) {
                 throw new HttpError(409, 'Email already in use by another user.');
@@ -96,33 +92,35 @@ export class UsersModel {
 
     /**
      * Adds credits to an existing user account.
-     * @param {string} externalId
+     * @param {string} id
      * @param {number} amount
      */
-    async rechargeByExternalId(externalId, amount) {
-        const user = await this.getByExternalId(externalId);
+    async rechargeById(id, amount) {
+        if (amount <= 0) {
+            throw new HttpError(400, 'Recharge amount must be positive.');
+        }
+        const user = await this.getById(id);
         await Mysql.update('users', { credits: { inc: amount } }, user.id);
-        return this.getById(user.id);
+        return this.getByIdOrNull(user.id);
     }
 
     /**
      * Deletes an existing user account.
-     * @param {string} externalId
+     * @param {string} id
      */
-    async deleteByExternalId(externalId) {
-        const user = await this.getByExternalId(externalId);
+    async deleteById(id) {
+        const user = await this.getById(id);
         await Mysql.delete('users', user.id);
     }
 
     /**
-     * @param {number} id
+     * @param {string} id
      */
-    async getById(id) {
-        const users = await Mysql.find('users', {
+    async getByIdOrNullOrNull(id) {
+        const users = await Mysql.findOne('users', {
             filter: { id },
             view: [
                 'id',
-                'external_id',
                 'name',
                 'email',
                 'credits',
@@ -132,40 +130,18 @@ export class UsersModel {
             opt: { limit: 1 }
         });
 
-        return users[0] ? mapUserRow(users[0]) : null;
-    }
-
-    /**
-     * @param {string} externalId
-     */
-    async getByExternalIdOrNull(externalId) {
-        const users = await Mysql.find('users', {
-            filter: { external_id: externalId },
-            view: [
-                'id',
-                'external_id',
-                'name',
-                'email',
-                'credits',
-                'created_at',
-                'updated_at'
-            ],
-            opt: { limit: 1 }
-        });
-
-        return users[0] ? mapUserRow(users[0]) : null;
+        return users ? mapUserRow(users) : null;
     }
 }
 
 export const usersModel = new UsersModel();
 
 /**
- * @param {{ id: number, external_id: string, name: string | null, email: string | null, credits: number | string, created_at: Date | string, updated_at: Date | string }} row
+ * @param {{ id: string, name: string | null, email: string | null, credits: number | string, created_at: Date | string, updated_at: Date | string }} row
  */
 function mapUserRow(row) {
     return {
-        id: Number(row.id),
-        externalId: row.external_id,
+        id: row.id,
         name: row.name,
         email: row.email,
         credits: Number(row.credits),
