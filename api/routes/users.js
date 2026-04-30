@@ -1,5 +1,4 @@
 import express from 'express';
-import { HttpError } from '../helpers/error.js';
 import { parseBearerApiKey } from '../helpers/auth.js';
 import { sendCreated, sendSuccess } from '../helpers/response.js';
 import { usersModel } from '../models/users.js';
@@ -52,7 +51,7 @@ router.put('/users/:apiKey', async (req, res, next) => {
         const payload = parseUpdateUserBody(req.body);
         const updatedUser = await usersModel.updateById(user.id, payload);
 
-        return sendSuccess(res, { body: { user } });
+        return sendSuccess(res, { body: { user: updatedUser } });
     } catch (error) {
         return next(error);
     }
@@ -65,7 +64,7 @@ router.post('/users/:apiKey/recharge', async (req, res, next) => {
         const amount = parseRechargeBody(req.body);
         const updatedUser = await usersModel.rechargeById(user.id, amount);
 
-        return sendSuccess(res, { body: { user } });
+        return sendSuccess(res, { body: { user: updatedUser } });
     } catch (error) {
         return next(error);
     }
@@ -74,10 +73,10 @@ router.post('/users/:apiKey/recharge', async (req, res, next) => {
 router.post('/users/:apiKey/reset', async (req, res, next) => {
     try {
         const apiKey = parseBearerApiKey(req.headers);
-        const user = await usersModel.getByApiKey(apiKey);
-        const { user, apiKey } = await usersModel.resetApiKeyById(user.id);
+        const currentUser = await usersModel.getByApiKey(apiKey);
+        const { user: refreshedUser, apiKey: refreshedApiKey } = await usersModel.resetApiKeyById(currentUser.id);
 
-        return sendSuccess(res, { body: { user, apiKey } });
+        return sendSuccess(res, { body: { user: refreshedUser, apiKey: refreshedApiKey } });
     } catch (error) {
         return next(error);
     }

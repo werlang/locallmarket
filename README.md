@@ -20,15 +20,23 @@ Core design constraints:
 
 ## Runtime Flow
 
-### Order Creation and Consumer Flow
+### Worker Registration and Binding
 
-1. A provider registers a user account via `POST /users`.
-2. The provider connects a worker to the API WebSocket (`ws://.../ws/workers`).
-3. With the worker connected, the provider creates an orderbook entry via `POST /order` specifying `workerId`, `model`, `price`, and `tps`.
-4. A consumer registers their own user account and recharges credits via `POST /users/:id/recharge`.
-5. The consumer browses available orders via `GET /orders` (with optional model/price/tps/availability filters).
-6. The consumer calls `POST /workers/:orderid/use` supplying the request `message`. The API:
-   - Validates the order is available and the target worker is connected.
+1. A provider registers a user account via `POST /users`, which generates a unique `api_key`.
+2. The worker service connects to the API WebSocket endpoint (`ws://.../ws/workers`) and sends a `worker-register` message with its `workerId` and the user's `api_key` in the payload.
+3. The API validates the API key against the registered user and permanently binds the worker to that user. The binding is immutable: once a worker is bound to a user, the binding cannot be changed, protecting against hijacking attacks under concurrent registration attempts.
+4. Bound workers are recorded in the `workers` table with `user_id` ownership and status tracking (`connected`, `disconnected`).
+
+### Order Creation and Market-Style Matching
+
+1. With the worker connected and bound, the provider creates orderbook entries via `POST /order` specifying `workerId`, `model`, `price`, and `tps`.
+2. Each order is assigned ownership (`user_id`) and availability status. Orders are initially unmatched and available for consumers.
+3. Orders automatically trigger a **market-style matching flow**: the API finds connected workers owned by the same user (`user_id`), checks for available inventory, and pre-fills matching orders by atomically consuming them and dispatching jobs to available workers.
+4. Matching is race-free: orders are consumed transactionally with `FOR UPDATE` locks, preventing double-consumption and double-debit scenarios.
+5. A consumer registers their own user account and recharges credits via `POST /users/:id/recharge`.
+6. The consumer browses available orders via `GET /orders` (with optional model/price/tps/availability filters).
+7. The consumer calls `POST /workers/:orderid/use` supplying the request `message`. The API:
+   - Validates the order is available and the target worker is connected and owned by the order creator.
    - Atomically marks the order as consumed and deducts credits from the consumer's account.
    - Opens an SSE response immediately and dispatches the job to the reserved worker.
    - Relays `message`, `end`, and `error` events back to the consumer over SSE.
@@ -58,6 +66,34 @@ Returns current API queue depth and worker capacity.
   "queuedJobs": 0
 }
 ```
+
+---
+
+### Worker Registration and API Key Binding
+
+#### WebSocket Worker Registration
+
+Workers connect via WebSocket at `ws://<api-host>/ws/workers` and send a `worker-register` message:
+
+```json
+{
+  "type": "worker-register",
+  "payload": {
+    "workerId": "worker-001",
+    "apiKey": "<user-api-key>",
+    "hostname": "worker-hostname",
+    "pid": 12345
+  }
+}
+```
+
+On successful registration:
+- The API validates the `apiKey` against the user account and binds the worker to that user.
+- The worker is recorded in the `workers` table with immutable `user_id` ownership.
+- Worker status transitions to `connected`.
+- Orders owned by the same user are eligible for auto-matching with this worker.
+
+Security: Worker-to-user binding is immutable after initial registration. Duplicate registration attempts for the same `workerId` by different API keys will be rejected, preventing accidental or malicious worker hijacking.
 
 ---
 
@@ -191,6 +227,27 @@ Compatibility endpoint with dual behavior:
 - Request body (legacy mode): `{ "model": string, "message": string }`
 - Request body (order-consume mode): `{ "orderId": string|number, "message": string }`
 - New consumers should use `POST /workers/:orderid/use` instead.
+
+---
+
+## Workers Table and Schema
+
+The `workers` table stores bindings between worker instances and user accounts. It is created via `api/schema.sql` and includes:
+
+| Column | Type | Constraints | Purpose |
+|--------|------|-------------|----------|
+| `id` | VARCHAR(128) | PRIMARY KEY | Worker instance identifier |
+| `user_id` | VARCHAR(128) | NOT NULL, FK → users(id) | Owner user; immutable after initial binding |
+| `status` | VARCHAR(24) | DEFAULT 'connected' | Connection state: `connected`, `disconnected` |
+| `connected_at` | DATETIME | DEFAULT CURRENT_TIMESTAMP | Timestamp of most recent connection |
+| `disconnected_at` | DATETIME | NULL | Timestamp of most recent disconnection |
+| `last_seen_at` | DATETIME | NOT NULL | Timestamp of last activity |
+| `created_at` | DATETIME | DEFAULT CURRENT_TIMESTAMP | Account creation time |
+| `updated_at` | DATETIME | AUTO UPDATE | Last modification time |
+
+Indexes: `user_id`, `status`, `(user_id, status)` for fast lookups during matching and availability checks.
+
+See `api/schema.sql` for the full CREATE TABLE statement.
 
 ---
 

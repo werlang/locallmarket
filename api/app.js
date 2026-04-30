@@ -1,6 +1,6 @@
 import express from 'express';
 import { HttpError } from './helpers/error.js';
-import { WSServer } from './helpers/wsServer.js';
+import { WSServer } from './helpers/wsserver.js';
 import { StreamRouter } from './helpers/router.js';
 import { sendSuccess } from './helpers/response.js';
 import { errorMiddleware } from './middleware/error.js';

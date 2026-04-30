@@ -11,9 +11,6 @@ const mysqlOriginals = {
     update: Mysql.update,
     delete: Mysql.delete,
     withTransaction: Mysql.withTransaction,
-    between: Mysql.between,
-    gte: Mysql.gte,
-    lte: Mysql.lte,
     raw: Mysql.raw
 };
 
@@ -24,9 +21,6 @@ test.afterEach(() => {
     Mysql.update = mysqlOriginals.update;
     Mysql.delete = mysqlOriginals.delete;
     Mysql.withTransaction = mysqlOriginals.withTransaction;
-    Mysql.between = mysqlOriginals.between;
-    Mysql.gte = mysqlOriginals.gte;
-    Mysql.lte = mysqlOriginals.lte;
     Mysql.raw = mysqlOriginals.raw;
 });
 
@@ -94,16 +88,6 @@ test('create uses owner id and persists lifecycle defaults', async () => {
     assert.equal(created.status, 'created');
 });
 
-test('updateOwn enforces owner scoping', async () => {
-    const model = makeModel();
-    Mysql.findOne = async () => orderRow({ id: 5, user_id: 'owner-2' });
-
-    await assert.rejects(
-        () => model.updateOwn('owner-1', 5, { price: 10 }),
-        /only mutate your own orders/
-    );
-});
-
 test('deleteOwn deletes only when owner matches', async () => {
     const model = makeModel();
     Mysql.findOne = async () => orderRow({ id: 99, user_id: 'owner-9' });
@@ -115,36 +99,6 @@ test('deleteOwn deletes only when owner matches', async () => {
 
     await model.deleteOwn('owner-9', 99);
     assert.equal(deleted, 99);
-});
-
-test('listPublic overlays runtime worker availability and supports onlyAvailable', async () => {
-    const model = makeModel({
-        isWorkerConnected(workerId) {
-            return workerId !== 'w-offline';
-        },
-        isWorkerAvailable(workerId) {
-            return workerId === 'w-ready';
-        }
-    });
-
-    Mysql.find = async (_table, { filter }) => {
-        assert.equal(filter.is_consumed, 0);
-        return [
-            orderRow({ id: 1, worker_id: 'w-ready' }),
-            orderRow({ id: 2, worker_id: 'w-busy' }),
-            orderRow({ id: 3, worker_id: 'w-offline' })
-        ];
-    };
-
-    const all = await model.listPublic({ onlyAvailable: false, limit: 100, offset: 0 });
-    assert.equal(all.length, 3);
-    assert.equal(all[0].isAvailable, true);
-    assert.equal(all[1].isAvailable, false);
-    assert.equal(all[2].workerConnected, false);
-
-    const filtered = await model.listPublic({ onlyAvailable: true, limit: 100, offset: 0 });
-    assert.equal(filtered.length, 1);
-    assert.equal(filtered[0].workerId, 'w-ready');
 });
 
 test('findFirstAvailableOfferByModel skips spoofed off-owner offers and returns ownership-coherent offer', async () => {

@@ -48,47 +48,6 @@ export class OrdersModel {
     }
 
     /**
-     * Returns a single owner-scoped order.
-     * @param {string} ownerId
-     * @param {number} orderId
-     */
-    async getOwnById(ownerId, orderId) {
-        const { order } = await this.getOwnedOrder(ownerId, orderId);
-        return order;
-    }
-
-    /**
-     * Updates an owner-scoped order and validates worker connectivity when workerId changes.
-     *
-     * @param {string} ownerId
-     * @param {number} orderId
-     * @param {{ workerId?: string, model?: string, price?: number, tps?: number }} updates
-     */
-    async updateOwn(ownerId, orderId, updates) {
-        this.ensureStreamRouter();
-
-        const { order } = await this.getOwnedOrder(ownerId, orderId);
-
-        if (updates.workerId && !this.streamRouter.isWorkerConnected(updates.workerId)) {
-            throw new HttpError(409, 'workerId must reference a currently connected worker.');
-        }
-
-        const updateData = {
-            ...(updates.workerId !== undefined ? { worker_id: updates.workerId } : {}),
-            ...(updates.model !== undefined ? { model: updates.model } : {}),
-            ...(updates.price !== undefined ? { price: updates.price } : {}),
-            ...(updates.tps !== undefined ? { tps: updates.tps } : {})
-        };
-
-        const result = await Mysql.update('orders', updateData, order.id);
-        if (!result || result.affectedRows < 1) {
-            throw new HttpError(404, 'Order not found.');
-        }
-
-        return this.getOrderById(order.id);
-    }
-
-    /**
      * Deletes an owner-scoped order.
      * @param {string} ownerId
      * @param {number} orderId
@@ -147,78 +106,6 @@ export class OrdersModel {
         }
 
         return result;
-    }
-
-    /**
-     * Lists public orders with optional filters and real-time availability overlay.
-     * @param {{ model?: string, minPrice?: number, maxPrice?: number, minTps?: number, maxTps?: number, onlyAvailable: boolean, limit: number, offset: number }} filters
-     */
-    async listPublic(filters) {
-        this.ensureStreamRouter();
-
-        const filter = {
-            is_consumed: 0
-        };
-
-        if (filters.model) {
-            filter.model = filters.model;
-        }
-
-        if (filters.minPrice !== undefined && filters.maxPrice !== undefined) {
-            filter.price = Mysql.between(filters.minPrice, filters.maxPrice);
-        } else if (filters.minPrice !== undefined) {
-            filter.price = Mysql.gte(filters.minPrice);
-        } else if (filters.maxPrice !== undefined) {
-            filter.price = Mysql.lte(filters.maxPrice);
-        }
-
-        if (filters.minTps !== undefined && filters.maxTps !== undefined) {
-            filter.tps = Mysql.between(filters.minTps, filters.maxTps);
-        } else if (filters.minTps !== undefined) {
-            filter.tps = Mysql.gte(filters.minTps);
-        } else if (filters.maxTps !== undefined) {
-            filter.tps = Mysql.lte(filters.maxTps);
-        }
-
-        const rows = await Mysql.find('orders', {
-            filter,
-            view: [
-                'id',
-                'user_id',
-                'worker_id',
-                'model',
-                'price',
-                'tps',
-                'is_available',
-                'is_consumed',
-                'consumed_at',
-                'created_at',
-                'updated_at'
-            ],
-            opt: {
-                limit: filters.limit,
-                skip: filters.offset,
-                order: { id: -1 }
-            }
-        });
-
-        const hydrated = rows.map((orderRow) => {
-            const order = mapOrderRow(orderRow);
-            const connected = this.streamRouter.isWorkerConnected(order.workerId);
-            const currentlyAvailable = !order.isConsumed && connected && this.streamRouter.isWorkerAvailable(order.workerId);
-
-            return {
-                ...order,
-                isAvailable: currentlyAvailable,
-                workerConnected: connected
-            };
-        });
-
-        if (filters.onlyAvailable) {
-            return hydrated.filter((order) => order.isAvailable);
-        }
-
-        return hydrated;
     }
 
     /**
