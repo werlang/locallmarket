@@ -105,9 +105,27 @@ class FakeStream {
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 describe('StreamRouter', () => {
+    function createWorkersModel() {
+        return {
+            async bindConnectedWorker({ workerId, apiKey }) {
+                if (!apiKey) {
+                    throw new Error('apiKey required');
+                }
+
+                return {
+                    worker: { id: workerId || 'worker-1', userId: 'user-1' },
+                    user: { id: 'user-1' }
+                };
+            },
+            async markDisconnected() {
+                return undefined;
+            }
+        };
+    }
+
     it('getState() returns zero counts on init', () => {
         const wsServer = new FakeWSServer();
-        const router = new StreamRouter({ wsServer });
+        const router = new StreamRouter({ wsServer, workersModel: createWorkersModel() });
         assert.deepEqual(router.getState(), {
             connectedWorkers: 0,
             availableWorkers: 0,
@@ -118,7 +136,7 @@ describe('StreamRouter', () => {
 
     it('enqueue() returns a string id', () => {
         const wsServer = new FakeWSServer();
-        const router = new StreamRouter({ wsServer });
+        const router = new StreamRouter({ wsServer, workersModel: createWorkersModel() });
         const stream = new FakeStream();
         const id = router.enqueue({ payload: { message: 'hi', model: 'test' }, stream });
         assert.equal(typeof id, 'string');
@@ -127,28 +145,28 @@ describe('StreamRouter', () => {
 
     it('enqueue() with an available worker dispatches immediately', () => {
         const wsServer = new FakeWSServer();
-        const router = new StreamRouter({ wsServer });
+        const router = new StreamRouter({ wsServer, workersModel: createWorkersModel() });
         const ws = new FakeSocket('w1');
         wsServer.connect(ws);
-        wsServer.emit('worker-register', ws, { workerId: 'w1' });
-        wsServer.emit('worker-ready', ws);
+        wsServer.emit('worker-register', ws, { workerId: 'w1', apiKey: 'test-api-key' });
+        return new Promise((resolve) => setImmediate(resolve)).then(() => {
+            wsServer.emit('worker-ready', ws);
 
-        const stream = new FakeStream();
-        const jobId = router.enqueue({ payload: { message: 'hi', model: 'test' }, stream });
+            const stream = new FakeStream();
+            const jobId = router.enqueue({ payload: { message: 'hi', model: 'test' }, stream });
 
-        assert.equal(router.getState().activeJobs, 1);
-        assert.equal(router.getState().queuedJobs, 0);
-        // Worker should no longer be available after dispatch
-        assert.equal(router.getState().availableWorkers, 0);
-        // Worker socket received the stream-job message
-        const jobMsg = ws.sent.find(m => m.type === 'stream-job');
-        assert.ok(jobMsg);
-        assert.equal(jobMsg.payload.jobId, jobId);
+            assert.equal(router.getState().activeJobs, 1);
+            assert.equal(router.getState().queuedJobs, 0);
+            assert.equal(router.getState().availableWorkers, 0);
+            const jobMsg = ws.sent.find(m => m.type === 'stream-job');
+            assert.ok(jobMsg);
+            assert.equal(jobMsg.payload.jobId, jobId);
+        });
     });
 
     it('enqueue() with no workers broadcasts worker-ready-request', () => {
         const wsServer = new FakeWSServer();
-        const router = new StreamRouter({ wsServer });
+        const router = new StreamRouter({ wsServer, workersModel: createWorkersModel() });
         const stream = new FakeStream();
         wsServer.broadcasts = [];
         router.enqueue({ payload: { message: 'hi', model: 'test' }, stream });
@@ -158,7 +176,7 @@ describe('StreamRouter', () => {
 
     it('cancel() on a queued job removes it from the queue', () => {
         const wsServer = new FakeWSServer();
-        const router = new StreamRouter({ wsServer });
+        const router = new StreamRouter({ wsServer, workersModel: createWorkersModel() });
         const stream = new FakeStream();
         const jobId = router.enqueue({ payload: { message: 'hi', model: 'test' }, stream });
         assert.equal(router.getState().queuedJobs, 1);
@@ -166,12 +184,13 @@ describe('StreamRouter', () => {
         assert.equal(router.getState().queuedJobs, 0);
     });
 
-    it('cancel() on an active job sets job.disconnected to true', () => {
+    it('cancel() on an active job sets job.disconnected to true', async () => {
         const wsServer = new FakeWSServer();
-        const router = new StreamRouter({ wsServer });
+        const router = new StreamRouter({ wsServer, workersModel: createWorkersModel() });
         const ws = new FakeSocket('w1');
         wsServer.connect(ws);
-        wsServer.emit('worker-register', ws, { workerId: 'w1' });
+        wsServer.emit('worker-register', ws, { workerId: 'w1', apiKey: 'test-api-key' });
+        await new Promise((resolve) => setImmediate(resolve));
         wsServer.emit('worker-ready', ws);
 
         const stream = new FakeStream();
@@ -186,37 +205,42 @@ describe('StreamRouter', () => {
 
     it('registerWorker() registers a worker by provided id', () => {
         const wsServer = new FakeWSServer();
-        const router = new StreamRouter({ wsServer });
+        const router = new StreamRouter({ wsServer, workersModel: createWorkersModel() });
         const ws = new FakeSocket('sock');
         wsServer.connect(ws);
-        wsServer.emit('worker-register', ws, { workerId: 'my-worker' });
+        wsServer.emit('worker-register', ws, { workerId: 'my-worker', apiKey: 'test-api-key' });
 
-        assert.equal(router.workers.has('my-worker'), true);
-        assert.equal(ws.workerId, 'my-worker');
+        return new Promise((resolve) => setImmediate(resolve)).then(() => {
+            assert.equal(router.workers.has('my-worker'), true);
+            assert.equal(ws.workerId, 'my-worker');
+        });
     });
 
-    it('registerWorker() terminates the old socket on re-register with same id', () => {
+    it('registerWorker() terminates the old socket on re-register with same id', async () => {
         const wsServer = new FakeWSServer();
-        const router = new StreamRouter({ wsServer });
+        const router = new StreamRouter({ wsServer, workersModel: createWorkersModel() });
         const oldWs = new FakeSocket('old');
         const newWs = new FakeSocket('new');
 
         wsServer.connect(oldWs);
-        wsServer.emit('worker-register', oldWs, { workerId: 'shared-id' });
+        wsServer.emit('worker-register', oldWs, { workerId: 'shared-id', apiKey: 'test-api-key' });
+        await new Promise((resolve) => setImmediate(resolve));
         assert.equal(oldWs.terminated, false);
 
         wsServer.connect(newWs);
-        wsServer.emit('worker-register', newWs, { workerId: 'shared-id' });
+        wsServer.emit('worker-register', newWs, { workerId: 'shared-id', apiKey: 'test-api-key' });
+        await new Promise((resolve) => setImmediate(resolve));
         assert.equal(oldWs.terminated, true);
         assert.equal(router.workers.get('shared-id').ws, newWs);
     });
 
-    it('markWorkerReady() sets worker available and triggers dispatch', () => {
+    it('markWorkerReady() sets worker available and triggers dispatch', async () => {
         const wsServer = new FakeWSServer();
-        const router = new StreamRouter({ wsServer });
+        const router = new StreamRouter({ wsServer, workersModel: createWorkersModel() });
         const ws = new FakeSocket('w1');
         wsServer.connect(ws);
-        wsServer.emit('worker-register', ws, { workerId: 'w1' });
+        wsServer.emit('worker-register', ws, { workerId: 'w1', apiKey: 'test-api-key' });
+        await new Promise((resolve) => setImmediate(resolve));
 
         // Enqueue before marking ready so the job is waiting
         const stream = new FakeStream();
@@ -228,12 +252,13 @@ describe('StreamRouter', () => {
         assert.equal(router.getState().activeJobs, 1);
     });
 
-    it('handleStreamEvent() forwards event data to the job stream', () => {
+    it('handleStreamEvent() forwards event data to the job stream', async () => {
         const wsServer = new FakeWSServer();
-        const router = new StreamRouter({ wsServer });
+        const router = new StreamRouter({ wsServer, workersModel: createWorkersModel() });
         const ws = new FakeSocket('w1');
         wsServer.connect(ws);
-        wsServer.emit('worker-register', ws, { workerId: 'w1' });
+        wsServer.emit('worker-register', ws, { workerId: 'w1', apiKey: 'test-api-key' });
+        await new Promise((resolve) => setImmediate(resolve));
         wsServer.emit('worker-ready', ws);
 
         const stream = new FakeStream();
@@ -245,12 +270,13 @@ describe('StreamRouter', () => {
         assert.deepEqual(stream.events[0], { event: 'message', data: 'chunk' });
     });
 
-    it('handleStreamEvent() is ignored when jobId does not match worker current job', () => {
+    it('handleStreamEvent() is ignored when jobId does not match worker current job', async () => {
         const wsServer = new FakeWSServer();
-        const router = new StreamRouter({ wsServer });
+        const router = new StreamRouter({ wsServer, workersModel: createWorkersModel() });
         const ws = new FakeSocket('w1');
         wsServer.connect(ws);
-        wsServer.emit('worker-register', ws, { workerId: 'w1' });
+        wsServer.emit('worker-register', ws, { workerId: 'w1', apiKey: 'test-api-key' });
+        await new Promise((resolve) => setImmediate(resolve));
         wsServer.emit('worker-ready', ws);
 
         const stream = new FakeStream();
@@ -261,12 +287,13 @@ describe('StreamRouter', () => {
         assert.equal(stream.events.length, 0);
     });
 
-    it('handleWorkerDisconnect() removes the worker and finishes the active job with error', () => {
+    it('handleWorkerDisconnect() removes the worker and finishes the active job with error', async () => {
         const wsServer = new FakeWSServer();
-        const router = new StreamRouter({ wsServer });
+        const router = new StreamRouter({ wsServer, workersModel: createWorkersModel() });
         const ws = new FakeSocket('w1');
         wsServer.connect(ws);
-        wsServer.emit('worker-register', ws, { workerId: 'w1' });
+        wsServer.emit('worker-register', ws, { workerId: 'w1', apiKey: 'test-api-key' });
+        await new Promise((resolve) => setImmediate(resolve));
         wsServer.emit('worker-ready', ws);
 
         const stream = new FakeStream();
@@ -284,5 +311,51 @@ describe('StreamRouter', () => {
         const errorEvent = stream.events.find(e => e.event === 'error');
         assert.ok(errorEvent, 'Expected an error event on the stream');
         assert.equal(stream.closed, true);
+    });
+
+    it('job-complete settles order billing before releasing worker', async () => {
+        const wsServer = new FakeWSServer();
+        const settlements = [];
+        const router = new StreamRouter({
+            wsServer,
+            workersModel: createWorkersModel(),
+            ordersModel: {
+                async settleCompletedOrder(input) {
+                    settlements.push(input);
+                    return { status: 'settled' };
+                }
+            }
+        });
+        const ws = new FakeSocket('w1');
+        wsServer.connect(ws);
+        wsServer.emit('worker-register', ws, { workerId: 'w1', apiKey: 'test-api-key' });
+        await new Promise((resolve) => setImmediate(resolve));
+        wsServer.emit('worker-ready', ws);
+
+        const stream = new FakeStream();
+        const jobId = router.enqueue({
+            payload: { message: 'hi', model: 'test' },
+            stream,
+            settlement: {
+                orderId: 44,
+                requesterId: 'requester-1'
+            }
+        });
+
+        wsServer.emit('job-complete', ws, {
+            jobId,
+            usage: { total_tokens: 1200 }
+        });
+        await new Promise((resolve) => setImmediate(resolve));
+
+        assert.equal(settlements.length, 1);
+        assert.deepEqual(settlements[0], {
+            orderId: 44,
+            requesterId: 'requester-1',
+            workerOwnerId: 'user-1',
+            usage: { total_tokens: 1200 }
+        });
+        assert.equal(router.getState().activeJobs, 0);
+        assert.equal(router.getState().availableWorkers, 1);
     });
 });

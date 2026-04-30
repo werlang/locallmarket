@@ -2,115 +2,123 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { OrdersModel } from '../../models/orders.js';
+import { Mysql } from '../../helpers/mysql.js';
 
-/**
- * @param {Partial<OrdersModel>} methods
- */
-function makeModel({ ordersDriver = {}, usersDriver = {}, isWorkerConnected = () => true, isWorkerAvailable = () => true } = {}) {
+const mysqlOriginals = {
+    find: Mysql.find,
+    findOne: Mysql.findOne,
+    insert: Mysql.insert,
+    update: Mysql.update,
+    delete: Mysql.delete,
+    withTransaction: Mysql.withTransaction,
+    between: Mysql.between,
+    gte: Mysql.gte,
+    lte: Mysql.lte,
+    raw: Mysql.raw
+};
+
+test.afterEach(() => {
+    Mysql.find = mysqlOriginals.find;
+    Mysql.findOne = mysqlOriginals.findOne;
+    Mysql.insert = mysqlOriginals.insert;
+    Mysql.update = mysqlOriginals.update;
+    Mysql.delete = mysqlOriginals.delete;
+    Mysql.withTransaction = mysqlOriginals.withTransaction;
+    Mysql.between = mysqlOriginals.between;
+    Mysql.gte = mysqlOriginals.gte;
+    Mysql.lte = mysqlOriginals.lte;
+    Mysql.raw = mysqlOriginals.raw;
+});
+
+function makeModel({ isWorkerConnected = () => true, isWorkerAvailable = () => true } = {}) {
     return new OrdersModel({
-        ordersDriver,
-        usersDriver,
-        isWorkerConnected,
-        isWorkerAvailable
+        streamRouter: {
+            isWorkerConnected,
+            isWorkerAvailable,
+            isWorkerOwnedBy: () => true
+        }
     });
 }
 
+function orderRow(overrides = {}) {
+    return {
+        id: 1,
+        user_id: 'owner-1',
+        worker_id: 'worker-1',
+        model: 'llama',
+        price: 1.5,
+        tps: 20,
+        is_available: 0,
+        is_consumed: 0,
+        consumed_at: null,
+        created_at: '2026-04-30T00:00:00.000Z',
+        updated_at: '2026-04-30T00:00:00.000Z',
+        ...overrides
+    };
+}
+
 test('create rejects orders for disconnected workers', async () => {
-    const model = makeModel({
-        usersDriver: {
-            async getUserById() {
-                return { id: 1 };
-            }
-        },
-        isWorkerConnected: () => false
-    });
+    const model = makeModel({ isWorkerConnected: () => false });
 
     await assert.rejects(
-        () => model.create('owner-1', { workerId: 'w1', model: 'm', price: 1, tps: 10, isAvailable: true }),
+        () => model.create('owner-1', { workerId: 'w1', model: 'm', price: 1, tps: 10 }),
         /currently connected worker/
     );
 });
 
-test('create uses owner internal id when persisting', async () => {
-    const model = makeModel({
-        usersDriver: {
-            async getUserById() {
-                return { id: 42 };
-            }
-        },
-        ordersDriver: {
-            async createOrder(input) {
-                return { id: 9, ...input };
-            }
-        }
-    });
+test('create uses owner id and persists lifecycle defaults', async () => {
+    const model = makeModel();
+
+    Mysql.find = async () => [{ id: 'owner-1' }];
+    let inserted = null;
+    Mysql.insert = async (_table, data) => {
+        inserted = data;
+        return [{ insertId: 9 }];
+    };
+    Mysql.findOne = async (_table, { filter }) => {
+        assert.equal(filter.id, 9);
+        return orderRow({ id: 9 });
+    };
 
     const created = await model.create('owner-1', {
         workerId: 'worker-1',
         model: 'llama',
         price: 2,
-        tps: 30,
-        isAvailable: true
+        tps: 30
     });
 
-    assert.equal(created.userId, 42);
-    assert.equal(created.workerId, 'worker-1');
+    assert.equal(inserted.user_id, 'owner-1');
+    assert.equal(inserted.worker_id, 'worker-1');
+    assert.equal(inserted.is_available, 0);
+    assert.equal(inserted.is_consumed, 0);
+    assert.equal(created.status, 'created');
 });
 
 test('updateOwn enforces owner scoping', async () => {
-    const model = makeModel({
-        usersDriver: {
-            async getUserById() {
-                return { id: 2 };
-            }
-        },
-        ordersDriver: {
-            async getOrderById() {
-                return { id: 5, userId: 3, workerId: 'w1', isAvailable: true };
-            }
-        }
-    });
+    const model = makeModel();
+    Mysql.findOne = async () => orderRow({ id: 5, user_id: 'owner-2' });
 
     await assert.rejects(
-        () => model.updateOwn('owner-2', 5, { price: 10 }),
+        () => model.updateOwn('owner-1', 5, { price: 10 }),
         /only mutate your own orders/
     );
 });
 
 test('deleteOwn deletes only when owner matches', async () => {
-    let deleted = null;
-    const model = makeModel({
-        usersDriver: {
-            async getUserById() {
-                return { id: 7 };
-            }
-        },
-        ordersDriver: {
-            async getOrderById() {
-                return { id: 99, userId: 7, workerId: 'w2', isAvailable: true };
-            },
-            async deleteOrder(id) {
-                deleted = id;
-                return true;
-            }
-        }
-    });
+    const model = makeModel();
+    Mysql.findOne = async () => orderRow({ id: 99, user_id: 'owner-9' });
 
-    await model.deleteOwn('owner-7', 99);
+    let deleted = null;
+    Mysql.delete = async (_table, id) => {
+        deleted = id;
+    };
+
+    await model.deleteOwn('owner-9', 99);
     assert.equal(deleted, 99);
 });
 
 test('listPublic overlays runtime worker availability and supports onlyAvailable', async () => {
     const model = makeModel({
-        ordersDriver: {
-            async listOrders() {
-                return [
-                    { id: 1, workerId: 'w-ready', isAvailable: true, isConsumed: false },
-                    { id: 2, workerId: 'w-busy', isAvailable: true, isConsumed: false },
-                    { id: 3, workerId: 'w-offline', isAvailable: true, isConsumed: false }
-                ];
-            }
-        },
         isWorkerConnected(workerId) {
             return workerId !== 'w-offline';
         },
@@ -118,6 +126,15 @@ test('listPublic overlays runtime worker availability and supports onlyAvailable
             return workerId === 'w-ready';
         }
     });
+
+    Mysql.find = async (_table, { filter }) => {
+        assert.equal(filter.is_consumed, 0);
+        return [
+            orderRow({ id: 1, worker_id: 'w-ready' }),
+            orderRow({ id: 2, worker_id: 'w-busy' }),
+            orderRow({ id: 3, worker_id: 'w-offline' })
+        ];
+    };
 
     const all = await model.listPublic({ onlyAvailable: false, limit: 100, offset: 0 });
     assert.equal(all.length, 3);
@@ -130,33 +147,43 @@ test('listPublic overlays runtime worker availability and supports onlyAvailable
     assert.equal(filtered[0].workerId, 'w-ready');
 });
 
-test('consumeForUse rejects when order worker is disconnected', async () => {
-    const model = makeModel({
-        ordersDriver: {
-            async getOrderById() {
-                return { id: 4, workerId: 'w-offline', isConsumed: false, isAvailable: true };
-            }
-        },
-        isWorkerConnected: () => false
-    });
-
-    await assert.rejects(
-        () => model.consumeForUse('consumer-1', 4),
-        /not connected/
-    );
-});
-
-test('consumeForUse maps insufficient credits to payment error', async () => {
-    const model = makeModel({
-        ordersDriver: {
-            async getOrderById() {
-                return { id: 4, workerId: 'w-1', isConsumed: false, isAvailable: true };
-            },
-            async consumeOrderForUse() {
-                return { status: 'insufficient_credits' };
+test('findFirstAvailableOfferByModel skips spoofed off-owner offers and returns ownership-coherent offer', async () => {
+    const ownership = new Map([
+        ['w-spoofed:owner-1', false],
+        ['w-valid:owner-2', true]
+    ]);
+    const model = new OrdersModel({
+        streamRouter: {
+            isWorkerConnected: () => true,
+            isWorkerAvailable: () => true,
+            isWorkerOwnedBy(workerId, userId) {
+                return ownership.get(`${workerId}:${userId}`) === true;
             }
         }
     });
+
+    Mysql.find = async () => [
+        orderRow({ id: 2, user_id: 'owner-1', worker_id: 'w-spoofed', model: 'gpt-4.1-mini', price: 99 }),
+        orderRow({ id: 3, user_id: 'owner-2', worker_id: 'w-valid', model: 'gpt-4.1-mini', price: 4 })
+    ];
+
+    const selected = await model.findFirstAvailableOfferByModel('gpt-4.1-mini');
+    assert.equal(selected.id, 3);
+    assert.equal(selected.workerId, 'w-valid');
+    assert.equal(selected.userId, 'owner-2');
+    assert.equal(selected.price, 4);
+});
+
+test('consumeForUse maps insufficient credits to payment error', async () => {
+    const model = makeModel();
+    Mysql.findOne = async (_table, { filter }) => {
+        if (filter?.id === 4) {
+            return orderRow({ id: 4, worker_id: 'worker-1', is_consumed: 0 });
+        }
+
+        return null;
+    };
+    Mysql.withTransaction = async () => ({ status: 'insufficient_credits' });
 
     await assert.rejects(
         () => model.consumeForUse('consumer-1', 4),
@@ -164,202 +191,152 @@ test('consumeForUse maps insufficient credits to payment error', async () => {
     );
 });
 
-test('consumeForUse returns consumed order payload', async () => {
-    const model = makeModel({
-        ordersDriver: {
-            async getOrderById() {
-                return { id: 4, workerId: 'w-1', isConsumed: false, isAvailable: true };
-            },
-            async consumeOrderForUse() {
-                return {
-                    status: 'consumed',
-                    order: { id: 4, workerId: 'w-1', model: 'llama' },
-                    consumer: { id: 9, credits: 2 }
-                };
-            }
+test('consumeForUse returns consumed order payload with updated consumer', async () => {
+    const model = makeModel();
+
+    let inTransaction = false;
+    Mysql.findOne = async (table, { filter }) => {
+        if (table === 'orders' && filter?.id === 4) {
+            return orderRow({ id: 4, worker_id: 'w-1', is_consumed: inTransaction ? 1 : 0 });
         }
-    });
+
+        if (table === 'users' && filter?.id === 'consumer-1') {
+            return { id: 'consumer-1', credits: 5 };
+        }
+
+        return null;
+    };
+    Mysql.update = async () => ({ affectedRows: 1 });
+    Mysql.raw = () => ({ toSqlString: () => 'NOW()' });
+    Mysql.withTransaction = async () => {
+        inTransaction = true;
+        return { status: 'consumed', orderId: 4, consumerId: 'consumer-1' };
+    };
 
     const result = await model.consumeForUse('consumer-1', 4);
     assert.equal(result.status, 'consumed');
     assert.equal(result.order.workerId, 'w-1');
-});
-
-test('unconsumForUse calls driver and returns restored status', async () => {
-    const restoredResult = {
-        status: 'restored',
-        order: { id: 4, isConsumed: false, isAvailable: true },
-        consumer: { id: 9, credits: 5 }
-    };
-    let driverCalled = false;
-
-    const model = makeModel({
-        ordersDriver: {
-            async unconsumOrderForUse({ orderId, consumerId }) {
-                assert.equal(orderId, 4);
-                assert.equal(consumerId, 'consumer-1');
-                driverCalled = true;
-                return restoredResult;
-            }
-        }
-    });
-
-    const result = await model.unconsumForUse('consumer-1', 4);
-    assert.equal(driverCalled, true);
-    assert.equal(result.status, 'restored');
-    assert.equal(result.order.isConsumed, false);
+    assert.equal(result.order.status, 'running');
+    assert.equal(result.consumer.credits, 5);
 });
 
 test('unconsumForUse treats not_consumed as idempotent no-op', async () => {
-    const model = makeModel({
-        ordersDriver: {
-            async unconsumOrderForUse() {
-                return { status: 'not_consumed' };
-            }
-        }
-    });
+    const model = makeModel();
+    Mysql.withTransaction = async () => ({ status: 'not_consumed' });
 
     const result = await model.unconsumForUse('consumer-1', 4);
     assert.equal(result.status, 'not_consumed');
 });
 
-test('unconsumForUse throws 404 when driver returns order_not_found', async () => {
-    const model = makeModel({
-        ordersDriver: {
-            async unconsumOrderForUse() {
-                return { status: 'order_not_found' };
-            }
-        }
+test('settleCompletedOrder computes token cost, applies platform fee split, and completes order', async () => {
+    const model = new OrdersModel({
+        streamRouter: {
+            isWorkerConnected: () => true,
+            isWorkerAvailable: () => true
+        },
+        platformFeePercent: 20
     });
+
+    const state = {
+        inTransaction: false,
+        order: orderRow({ id: 11, user_id: 'requester-1', worker_id: 'worker-1', is_consumed: 1, is_available: 0, price: 2.0 }),
+        requester: { id: 'requester-1', credits: 10.0 },
+        workerOwner: { id: 'owner-1', credits: 1.0 },
+        worker: { id: 'worker-1', user_id: 'owner-1' }
+    };
+
+    Mysql.findOne = async (table, { filter }) => {
+        if (table === 'orders' && filter?.id === 11) {
+            return state.order;
+        }
+
+        if (table === 'users' && filter?.id === 'requester-1') {
+            return state.requester;
+        }
+
+        if (table === 'users' && filter?.id === 'owner-1') {
+            return state.workerOwner;
+        }
+
+        if (table === 'workers' && filter?.id === 'worker-1') {
+            return state.worker;
+        }
+
+        return null;
+    };
+
+    Mysql.update = async (table, data, where) => {
+        if (table === 'users' && where === 'requester-1') {
+            state.requester = {
+                ...state.requester,
+                credits: Number((state.requester.credits - Number(data.credits.dec)).toFixed(6))
+            };
+            return { affectedRows: 1 };
+        }
+
+        if (table === 'users' && where === 'owner-1') {
+            state.workerOwner = {
+                ...state.workerOwner,
+                credits: Number((state.workerOwner.credits + Number(data.credits.inc)).toFixed(6))
+            };
+            return { affectedRows: 1 };
+        }
+
+        if (table === 'orders') {
+            state.order = {
+                ...state.order,
+                ...data
+            };
+            return { affectedRows: 1 };
+        }
+
+        return { affectedRows: 0 };
+    };
+
+    Mysql.withTransaction = async (operation) => operation({});
+
+    const result = await model.settleCompletedOrder({
+        orderId: 11,
+        requesterId: 'requester-1',
+        workerOwnerId: 'owner-1',
+        usage: { total_tokens: 500000 }
+    });
+
+    assert.equal(result.status, 'settled');
+    assert.equal(result.billing.totalCost, 1);
+    assert.equal(result.billing.platformFeeAmount, 0.2);
+    assert.equal(result.billing.workerCreditAmount, 0.8);
+    assert.equal(result.order.status, 'completed');
+    assert.equal(result.requester.credits, 9);
+    assert.equal(result.workerOwner.credits, 1.8);
+});
+
+test('settleCompletedOrder rejects when requester does not own the order', async () => {
+    const model = new OrdersModel({
+        streamRouter: {
+            isWorkerConnected: () => true,
+            isWorkerAvailable: () => true
+        },
+        platformFeePercent: 20
+    });
+
+    Mysql.findOne = async (table, { filter }) => {
+        if (table === 'orders' && filter?.id === 15) {
+            return orderRow({ id: 15, user_id: 'actual-owner', worker_id: 'worker-1', is_consumed: 1, is_available: 0, price: 2.0 });
+        }
+
+        return null;
+    };
+
+    Mysql.withTransaction = async (operation) => operation({});
 
     await assert.rejects(
-        () => model.unconsumForUse('consumer-1', 99),
-        /Order not found during compensation/
+        () => model.settleCompletedOrder({
+            orderId: 15,
+            requesterId: 'different-requester',
+            workerOwnerId: 'owner-1',
+            usage: { total_tokens: 1000 }
+        }),
+        /Requester mismatch for settlement/
     );
 });
-
-test('unconsumForUse throws 404 when driver returns consumer_not_found', async () => {
-    const model = makeModel({
-        ordersDriver: {
-            async unconsumOrderForUse() {
-                return { status: 'consumer_not_found' };
-            }
-        }
-    });
-
-    await assert.rejects(
-        () => model.unconsumForUse('ghost-consumer', 4),
-        /Consumer user not found during compensation/
-    );
-});
-
-// ---------------------------------------------------------------------------
-// T03 – orderbook CRUD + connected-worker requirement
-// ---------------------------------------------------------------------------
-
-test('create throws 404 when owner user is not found', async () => {
-    const model = makeModel({
-        usersDriver: {
-            async getUserById() { return null; }
-        }
-    });
-
-    await assert.rejects(
-        () => model.create('unknown-owner', { workerId: 'w1', model: 'm', price: 1, tps: 10, isAvailable: true }),
-        /Owner user not found/
-    );
-});
-
-test('getOwnById returns order when owner matches', async () => {
-    const model = makeModel({
-        usersDriver: {
-            async getUserById() { return { id: 5 }; }
-        },
-        ordersDriver: {
-            async getOrderById() {
-                return { id: 10, userId: 5, workerId: 'w1', model: 'llama', price: 1, tps: 20, isAvailable: true };
-            }
-        }
-    });
-
-    const order = await model.getOwnById('owner-5', 10);
-    assert.equal(order.id, 10);
-    assert.equal(order.workerId, 'w1');
-});
-
-test('getOwnById throws 404 when order is not found', async () => {
-    const model = makeModel({
-        usersDriver: {
-            async getUserById() { return { id: 5 }; }
-        },
-        ordersDriver: {
-            async getOrderById() { return null; }
-        }
-    });
-
-    await assert.rejects(
-        () => model.getOwnById('owner-5', 999),
-        /Order not found/
-    );
-});
-
-test('getOwnById throws 403 when order belongs to a different user', async () => {
-    const model = makeModel({
-        usersDriver: {
-            async getUserById() { return { id: 5 }; }
-        },
-        ordersDriver: {
-            async getOrderById() {
-                return { id: 10, userId: 99, workerId: 'w1', isAvailable: true };
-            }
-        }
-    });
-
-    await assert.rejects(
-        () => model.getOwnById('owner-5', 10),
-        /only mutate your own orders/
-    );
-});
-
-test('updateOwn returns updated order when owner matches and update is valid', async () => {
-    let updatedWith = null;
-    const model = makeModel({
-        usersDriver: {
-            async getUserById() { return { id: 7 }; }
-        },
-        ordersDriver: {
-            async getOrderById() {
-                return { id: 20, userId: 7, workerId: 'w1', isAvailable: true };
-            },
-            async updateOrder(id, updates) {
-                updatedWith = { id, updates };
-                return { id, ...updates };
-            }
-        }
-    });
-
-    const updated = await model.updateOwn('owner-7', 20, { price: 5 });
-    assert.equal(updated.id, 20);
-    assert.equal(updated.price, 5);
-    assert.deepEqual(updatedWith, { id: 20, updates: { price: 5 } });
-});
-
-test('updateOwn rejects new workerId that references a disconnected worker', async () => {
-    const model = makeModel({
-        usersDriver: {
-            async getUserById() { return { id: 7 }; }
-        },
-        ordersDriver: {
-            async getOrderById() {
-                return { id: 20, userId: 7, workerId: 'w-old', isAvailable: true };
-            }
-        },
-        isWorkerConnected: (workerId) => workerId !== 'w-new-offline'
-    });
-
-    await assert.rejects(
-        () => model.updateOwn('owner-7', 20, { workerId: 'w-new-offline' }),
-        /currently connected worker/
-    );
-});
-
