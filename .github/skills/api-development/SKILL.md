@@ -138,10 +138,21 @@ When adding or modifying Worker behavior:
 4. Add or update tests in `worker/test/unit/` or `worker/test/integration/`.
 5. Run `cd worker && npm test` and confirm all tests pass.
 
+## Architecture Guardrails (Mandatory)
+
+1. Never create or patch schema from live application code. Use explicit SQL scripts/migrations only, executed outside app startup.
+2. Never write raw SQL outside the MySQL driver module (`api/helpers/mysql.js`).
+3. If persistence behavior is missing, add a new generic MySQL driver method and call it from models.
+4. Keep MySQL driver logic generic and reusable; do not place business/domain policy in driver methods.
+5. Models are the exclusive owners of entity business logic. Entity business logic must not be implemented in routers, helpers, middleware, or the MySQL driver.
+6. Routers must stay thin (request/response orchestration only). Helpers are limited to cross-entity/non-entity logic such as pricing or worker availability.
+7. Favor clean current architecture over legacy compatibility patches for this pre-launch project.
+8. When requested to follow references, treat `.github/references/` (especially `api1`) as strict standards.
+
 ## Conventions
 
 - ESM only — `"type": "module"` in both `package.json` files; use `import`/`export` throughout.
 - Node.js 22+; no transpilation, no Babel.
-- No MySQL, Redis, auth, JWT, sessions, or external databases in this project.
+- MySQL usage follows driver-method boundaries and migration-only schema management.
 - Keep HTTP surface limited to `GET` and `POST`; avoid `PUT`/`PATCH`/`DELETE` unless clearly required.
 - Propagate errors to `next(error)` in route handlers; let `errorMiddleware` format the response.

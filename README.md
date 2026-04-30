@@ -6,9 +6,9 @@ Core design constraints:
 
 - Workers connect outbound to the API over WebSocket; the API owns all client-facing routes.
 - API HTTP composition is intentionally thin: `api/app.js` wires middleware/startup and mounts resource routers from `api/routes/`.
-- SQL is confined to `api/drivers/mysql/` only. No SQL appears in models, helpers, routes, or middleware.
+- Database interactions must go through MySQL driver methods only (current driver module: `api/helpers/mysql.js`). No raw SQL is allowed outside the driver.
 - `GET /ready` on the API reports worker capacity and queue depth.
-- MySQL bootstrap is opt-in and gated by `MYSQL_ENABLED=true`.
+- Schema creation and schema changes are managed by explicit SQL scripts/migrations executed outside app runtime.
 
 ## Services
 
@@ -198,15 +198,32 @@ Compatibility endpoint with dual behavior:
 
 ### SQL Confinement
 
-**All SQL lives exclusively in `api/drivers/mysql/`.**
+**All SQL lives exclusively in the MySQL driver module (`api/helpers/mysql.js`).**
 
-Models, helpers, routes, and middleware must not contain SQL. They interact with the database only through the public methods exported by the MySQL drivers (`api/drivers/mysql/users.js`, `api/drivers/mysql/orders.js`). This is enforced by convention and validated by the CI scan in the worker logs.
+Routes, models, helpers, and middleware must not embed raw SQL. If persistence behavior is missing, add a new public driver method and consume that method from model code.
 
-### MySQL Bootstrap
+### Schema Management
 
 MySQL is opt-in. When `MYSQL_ENABLED=false` (the default), the API starts without a database and all user/order routes return `503`. Set `MYSQL_ENABLED=true` and provide connection env vars to enable persistence.
 
-Schema is bootstrapped automatically on startup via `CREATE TABLE IF NOT EXISTS`. No manual migration step is required for a fresh deployment.
+Do not create or alter schema at application startup. Apply schema changes through versioned SQL scripts/migrations and run them manually on the target connection.
+
+### Layer Ownership
+
+- MySQL driver stays generic and business-logic free.
+- Models are the exclusive owners of entity business logic.
+- Entity business logic must not be implemented in routers, helpers, middleware, or the driver.
+- Models perform SQL operations through driver methods.
+- Routers stay thin: request parsing/validation, response shaping, and calls into models/helpers only.
+- Helpers own only cross-entity/non-entity business logic (for example: pricing and worker availability checks).
+
+### Architecture Direction
+
+Prioritize clean current architecture over legacy compatibility patches because this project is pre-launch.
+
+### References as Standard
+
+When a task asks to follow references, treat `.github/references/` (especially `api1`) as mandatory implementation guidance.
 
 ---
 
