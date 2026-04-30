@@ -13,15 +13,15 @@ import {
     parseUpdateOrderBody
 } from '../../helpers/orders.js';
 
-test('parseOwnerIdHeader requires x-user-id header', () => {
+test('parseOwnerIdHeader requires Authorization Bearer header', () => {
     assert.equal(
-        parseOwnerIdHeader({ 'x-user-id': ' user-1 ' }),
-        'user-1'
+        parseOwnerIdHeader({ authorization: 'Bearer key-1' }),
+        'key-1'
     );
 
     assert.throws(
         () => parseOwnerIdHeader({}),
-        /x-user-id header is required/
+        /Authorization header with Bearer token is required/
     );
 });
 
@@ -156,7 +156,7 @@ test('applyOrderUseStream opens SSE stream and enqueues targeted job on successf
         cancel() {}
     };
 
-    const req = { headers: { 'x-user-id': 'consumer-1' }, body: { message: 'hello' } };
+    const req = { headers: { authorization: 'Bearer consumer-1-key' }, body: { message: 'hello' } };
     const res = makeMockRes();
     const errors = [];
     const next = (err) => errors.push(err);
@@ -196,7 +196,7 @@ test('applyOrderUseStream legacy /stream route: orderId sourced from body', asyn
         cancel() {}
     };
 
-    const req = { headers: { 'x-user-id': 'consumer-2' }, body: { orderId: '7', message: 'query' } };
+    const req = { headers: { authorization: 'Bearer consumer-2-key' }, body: { orderId: '7', message: 'query' } };
     const res = makeMockRes();
     const next = () => {};
 
@@ -235,7 +235,7 @@ test('applyOrderUseStream compensation: onJobAborted reverses consume and signal
         cancel() {}
     };
 
-    const req = { headers: { 'x-user-id': 'consumer-3' }, body: { message: 'test' } };
+    const req = { headers: { authorization: 'Bearer consumer-3-key' }, body: { message: 'test' } };
     const res = makeMockRes();
     const next = () => {};
 
@@ -262,7 +262,7 @@ test('applyOrderUseStream passes error to next() when consume fails before heade
     };
     const mockStreamRouter = { enqueue() {}, cancel() {} };
 
-    const req = { headers: { 'x-user-id': 'consumer-4' }, body: { message: 'hi' } };
+    const req = { headers: { authorization: 'Bearer consumer-4-key' }, body: { message: 'hi' } };
     const res = makeMockRes();
     const errors = [];
     const next = (err) => errors.push(err);

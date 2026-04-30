@@ -95,7 +95,7 @@ test('createStreamRouter /stream with orderId uses order consume mode', async ()
     const handler = getPostHandler(router, '/stream');
 
     const req = {
-        headers: { 'x-user-id': 'consumer-stream' },
+        headers: { authorization: 'Bearer consumer-stream-key' },
         body: { orderId: '11', message: 'route dispatch' }
     };
     const res = makeMockRes();
@@ -140,7 +140,7 @@ test('createStreamRouter /workers/:orderid/use preserves param-based order consu
 
     const req = {
         params: { orderid: '29' },
-        headers: { 'x-user-id': 'consumer-param' },
+        headers: { authorization: 'Bearer consumer-param-key' },
         body: { message: 'from param route' }
     };
     const res = makeMockRes();
