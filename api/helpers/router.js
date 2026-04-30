@@ -2,18 +2,17 @@ import Queue from './queue.js';
 
 /**
  * Routes queued client stream jobs to the first available worker socket.
- * Supports automatic order matching when workers connect.
  */
 export class StreamRouter {
 
     /**
-     * @param {{ wsServer: import('./wsserver.js').default, workersModel?: any, matchingHelper?: import('./matching.js').OrderMatchingHelper }} options
+     * @param {{ wsServer: import('./wsserver.js').default, workersModel?: any, ordersModel?: any }} options
      */
-    constructor({ wsServer, workersModel = null, matchingHelper = null }) {
+    constructor({ wsServer, workersModel = null, ordersModel = null }) {
         this.queue = new Queue();
         this.wsServer = wsServer;
         this.workersModel = workersModel;
-        this.matchingHelper = matchingHelper;
+        this.ordersModel = ordersModel;
         this.workers = new Map();
         this.activeJobs = new Map();
 
@@ -44,8 +43,30 @@ export class StreamRouter {
                 return;
             }
 
-            this.finishJob(payload?.jobId, { workerId: worker.id });
-            console.log(`[${new Date().toISOString()}] Worker ${worker.id} completed job ${payload?.jobId}.`);
+            const settlement = this.settleCompletedJobIfNeeded(payload?.jobId, {
+                workerId: worker.id,
+                workerOwnerId: worker.ownerId,
+                usage: payload?.usage
+            });
+
+            if (!settlement) {
+                this.finishJob(payload?.jobId, { workerId: worker.id });
+                console.log(`[${new Date().toISOString()}] Worker ${worker.id} completed job ${payload?.jobId}.`);
+                return;
+            }
+
+            settlement
+                .then(() => {
+                    this.finishJob(payload?.jobId, { workerId: worker.id });
+                    console.log(`[${new Date().toISOString()}] Worker ${worker.id} completed job ${payload?.jobId}.`);
+                })
+                .catch((error) => {
+                    console.error(`[${new Date().toISOString()}] Settlement failed for job ${payload?.jobId}:`, error?.message || error);
+                    this.finishJob(payload?.jobId, {
+                        workerId: worker.id,
+                        errorMessage: 'Job finished but billing settlement failed.'
+                    });
+                });
         });
 
         this.wsServer.on('job-failed', (ws, payload) => {
@@ -64,7 +85,7 @@ export class StreamRouter {
 
     /**
      * Adds a client stream request to the shared API queue.
-     * @param {{ payload: { message: string, model: string }, stream: import('./stream.js').Stream, targetWorkerId?: string, onJobAborted?: () => void }} job
+    * @param {{ payload: { message: string, model: string }, stream: import('./stream.js').Stream, targetWorkerId?: string, settlement?: { orderId: number, requesterId: string }, onJobAborted?: () => void }} job
      * @returns {string}
      */
     enqueue(job) {
@@ -77,6 +98,12 @@ export class StreamRouter {
             errorSent: false,
             workerId: null,
             targetWorkerId: normalizedTargetWorkerId,
+            settlement: job.settlement && typeof job.settlement === 'object'
+                ? {
+                    orderId: Number(job.settlement.orderId),
+                    requesterId: job.settlement.requesterId
+                }
+                : null,
             onJobAborted: typeof job.onJobAborted === 'function' ? job.onJobAborted : null
         };
 
@@ -224,11 +251,6 @@ export class StreamRouter {
             jobId: null
         });
         console.log(`[${new Date().toISOString()}] Registered worker ${boundWorkerId}.`);
-
-        // Trigger asynchronous matching for pending orders for this worker (fire-and-forget)
-        if (this.matchingHelper) {
-            this.#triggerOrderMatchingAsync(boundWorkerId);
-        }
 
         this.requestWorkerReady(ws);
     }
@@ -440,31 +462,6 @@ export class StreamRouter {
     }
 
     /**
-     * Asynchronously triggers order matching for a newly registered worker.
-     * Attempts to match and consume pending orders if the worker is available.
-     * Errors are logged but do not propagate (fire-and-forget pattern).
-     *
-     * @param {string} workerId
-     */
-    async #triggerOrderMatchingAsync(workerId) {
-        if (!this.matchingHelper) {
-            return;
-        }
-
-        try {
-            const matches = await this.matchingHelper.matchOrdersForWorker(workerId);
-            if (matches.length > 0) {
-                const successCount = matches.filter((m) => m.status === 'matched').length;
-                if (successCount > 0) {
-                    console.log(`[StreamRouter] Worker ${workerId} matched ${successCount} pending order(s).`);
-                }
-            }
-        } catch (error) {
-            console.error(`[StreamRouter] Failed to match orders for worker ${workerId}:`, error?.message || error);
-        }
-    }
-
-    /**
      * Returns a specific worker when it is connected and currently available.
      * @param {string} workerId
     * @returns {{ id: string, ws: import('ws').WebSocket, ownerId: string, available: boolean, jobId: string | null } | null}
@@ -531,5 +528,37 @@ export class StreamRouter {
         worker.jobId = null;
         worker.ws.activeJobId = null;
         worker.available = true;
+    }
+
+    /**
+     * Settles requester/worker-owner billing when a completed job was tied to an order.
+     * Returns null for non-order jobs so completion stays synchronous for legacy flows.
+     *
+     * @param {string | undefined} jobId
+     * @param {{ workerId: string, workerOwnerId: string | null, usage?: any }} options
+     * @returns {Promise<void> | null}
+     */
+    settleCompletedJobIfNeeded(jobId, { workerId, workerOwnerId, usage }) {
+        if (typeof jobId !== 'string') {
+            return null;
+        }
+
+        const job = this.activeJobs.get(jobId);
+        if (!job || !job.settlement || !this.ordersModel) {
+            return null;
+        }
+
+        if (!workerOwnerId) {
+            return Promise.reject(new Error(`Worker ${workerId} has no bound owner for settlement.`));
+        }
+
+        return this.ordersModel
+            .settleCompletedOrder({
+                orderId: Number(job.settlement.orderId),
+                requesterId: String(job.settlement.requesterId),
+                workerOwnerId,
+                usage
+            })
+            .then(() => undefined);
     }
 }
