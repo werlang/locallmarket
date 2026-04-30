@@ -9,7 +9,8 @@ const port = process.env.PORT || 3000;
 const host = '0.0.0.0';
 
 const apiClient = new ApiStreamClient({
-    url: process.env.API_WS_URL
+    url: process.env.API_WS_URL,
+    apiKey: process.env.WORKER_USER_API_KEY
 });
 
 app.use(express.json());

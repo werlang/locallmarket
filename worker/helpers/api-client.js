@@ -36,11 +36,16 @@ class SocketStream {
 export class ApiStreamClient {
 
     /**
-     * @param {{ url?: string, workerId?: string }} options
+     * @param {{ url?: string, workerId?: string, apiKey?: string }} options
      */
-    constructor({ url = 'ws://127.0.0.1:3000/ws/workers', workerId = `${os.hostname()}-${process.pid}` } = {}) {
+    constructor({
+        url = 'ws://127.0.0.1:3000/ws/workers',
+        workerId = `${os.hostname()}-${process.pid}`,
+        apiKey = process.env.WORKER_USER_API_KEY
+    } = {}) {
         this.url = url;
         this.workerId = workerId;
+        this.apiKey = typeof apiKey === 'string' ? apiKey.trim() : '';
         this.socket = null;
         this.busy = false;
         this.currentJobId = null;
@@ -85,9 +90,18 @@ export class ApiStreamClient {
             return;
         }
 
+        if (!this.apiKey) {
+            console.error('WORKER_USER_API_KEY is required for worker registration. Closing socket.');
+            socket.close();
+            return;
+        }
+
         console.log(`Connected to API WebSocket ${this.url} as ${this.workerId}`);
         this.reconnectDelayMs = DEFAULT_RECONNECT_DELAY_MS;
-        this.sendToSocket(socket, 'worker-register', { workerId: this.workerId });
+        this.sendToSocket(socket, 'worker-register', {
+            workerId: this.workerId,
+            apiKey: this.apiKey
+        });
         this.sendReady();
     }
 

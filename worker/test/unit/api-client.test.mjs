@@ -33,7 +33,7 @@ test('ApiStreamClient constructor', async (t) => {
 
 test('ApiStreamClient.sendToSocket', async (t) => {
     await t.test('sends correct JSON { type, payload } to the socket', () => {
-        const client = new ApiStreamClient({ workerId: 'w1' });
+        const client = new ApiStreamClient({ workerId: 'w1', apiKey: 'test-api-key' });
         const socket = new FakeSocket();
 
         const result = client.sendToSocket(socket, 'worker-register', { workerId: 'w1' });
@@ -47,7 +47,7 @@ test('ApiStreamClient.sendToSocket', async (t) => {
     });
 
     await t.test('returns false and does not send when socket is not open', () => {
-        const client = new ApiStreamClient({ workerId: 'w1' });
+        const client = new ApiStreamClient({ workerId: 'w1', apiKey: 'test-api-key' });
         const socket = new FakeSocket();
         socket.readyState = WebSocket.CLOSED;
 
@@ -60,7 +60,7 @@ test('ApiStreamClient.sendToSocket', async (t) => {
 
 test('ApiStreamClient.sendReady', async (t) => {
     await t.test('sends worker-ready message when not busy', () => {
-        const client = new ApiStreamClient({ workerId: 'w1' });
+        const client = new ApiStreamClient({ workerId: 'w1', apiKey: 'test-api-key' });
         const socket = new FakeSocket();
         client.socket = socket;
         client.busy = false;
@@ -76,7 +76,7 @@ test('ApiStreamClient.sendReady', async (t) => {
     });
 
     await t.test('does not send when busy is true', () => {
-        const client = new ApiStreamClient({ workerId: 'w1' });
+        const client = new ApiStreamClient({ workerId: 'w1', apiKey: 'test-api-key' });
         const socket = new FakeSocket();
         client.socket = socket;
         client.busy = true;
@@ -90,7 +90,7 @@ test('ApiStreamClient.sendReady', async (t) => {
 
 test('ApiStreamClient.handleMessage', async (t) => {
     await t.test('calls processJob for stream-job type', () => {
-        const client = new ApiStreamClient({ workerId: 'w1' });
+        const client = new ApiStreamClient({ workerId: 'w1', apiKey: 'test-api-key' });
         const captured = [];
         client.processJob = (payload) => captured.push(payload);
 
@@ -101,7 +101,7 @@ test('ApiStreamClient.handleMessage', async (t) => {
     });
 
     await t.test('calls sendReady for worker-ready-request type when not busy', () => {
-        const client = new ApiStreamClient({ workerId: 'w1' });
+        const client = new ApiStreamClient({ workerId: 'w1', apiKey: 'test-api-key' });
         const socket = new FakeSocket();
         client.socket = socket;
         client.busy = false;
@@ -113,7 +113,7 @@ test('ApiStreamClient.handleMessage', async (t) => {
     });
 
     await t.test('does not call sendReady for worker-ready-request when busy', () => {
-        const client = new ApiStreamClient({ workerId: 'w1' });
+        const client = new ApiStreamClient({ workerId: 'w1', apiKey: 'test-api-key' });
         const socket = new FakeSocket();
         client.socket = socket;
         client.busy = true;
@@ -124,7 +124,7 @@ test('ApiStreamClient.handleMessage', async (t) => {
     });
 
     await t.test('ignores unknown message types', () => {
-        const client = new ApiStreamClient({ workerId: 'w1' });
+        const client = new ApiStreamClient({ workerId: 'w1', apiKey: 'test-api-key' });
         const socket = new FakeSocket();
         client.socket = socket;
         let processJobCalled = false;

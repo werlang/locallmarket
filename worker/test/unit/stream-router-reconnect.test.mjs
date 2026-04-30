@@ -104,16 +104,32 @@ class FakeStream {
     }
 }
 
-test('StreamRouter ignores stale socket events and does not free a reassigned worker', () => {
+test('StreamRouter ignores stale socket events and does not free a reassigned worker', async () => {
     const wsServer = new FakeWSServer();
-    const router = new StreamRouter({ wsServer });
+    const workersModel = {
+        async bindConnectedWorker({ workerId, apiKey }) {
+            if (!apiKey) {
+                throw new Error('apiKey required');
+            }
+
+            return {
+                worker: { id: workerId, userId: 'user-1' },
+                user: { id: 'user-1' }
+            };
+        },
+        async markDisconnected() {
+            return undefined;
+        }
+    };
+    const router = new StreamRouter({ wsServer, workersModel });
     const oldSocket = new FakeSocket('old-session');
     const newSocket = new FakeSocket('new-session');
     const firstStream = new FakeStream();
     const secondStream = new FakeStream();
 
     wsServer.connect(oldSocket);
-    wsServer.emit('worker-register', oldSocket, { workerId: 'worker-1' });
+    wsServer.emit('worker-register', oldSocket, { workerId: 'worker-1', apiKey: 'test-api-key' });
+    await new Promise((resolve) => setImmediate(resolve));
     wsServer.emit('worker-ready', oldSocket);
 
     const firstJobId = router.enqueue({
@@ -122,7 +138,8 @@ test('StreamRouter ignores stale socket events and does not free a reassigned wo
     });
 
     wsServer.connect(newSocket);
-    wsServer.emit('worker-register', newSocket, { workerId: 'worker-1' });
+    wsServer.emit('worker-register', newSocket, { workerId: 'worker-1', apiKey: 'test-api-key' });
+    await new Promise((resolve) => setImmediate(resolve));
 
     assert.equal(oldSocket.terminated, true);
     assert.equal(router.getState().connectedWorkers, 1);
@@ -167,7 +184,7 @@ test('StreamRouter ignores stale socket events and does not free a reassigned wo
 });
 
 test('ApiStreamClient keeps a disconnected job busy and does not leak late events onto a reconnected socket', async () => {
-    const client = new ApiStreamClient({ url: 'ws://example.test/ws/workers', workerId: 'worker-1' });
+    const client = new ApiStreamClient({ url: 'ws://example.test/ws/workers', workerId: 'worker-1', apiKey: 'test-api-key' });
     const oldSocket = new FakeSocket('old-job-socket');
     const newSocket = new FakeSocket('new-job-socket');
     const originalStreamOutput = LLM.prototype.streamOutput;
