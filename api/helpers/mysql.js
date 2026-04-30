@@ -26,6 +26,7 @@ export class Mysql {
 
         Mysql.connection = mysql.createPool({ ...config, ...Mysql.config });
         Mysql.connected = true;
+        console.log(`MySQL connected to database ${Mysql.config.database} at ${Mysql.config.host}:${Mysql.config.port}`);
         return this;
     }
 
@@ -36,6 +37,7 @@ export class Mysql {
         if (!Mysql.connected) return this;
         Mysql.connection.end();
         Mysql.connected = false;
+        console.log(`MySQL disconnected from database ${Mysql.config.database} at ${Mysql.config.host}:${Mysql.config.port}`);
     }
 
     /**

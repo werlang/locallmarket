@@ -9,7 +9,7 @@ const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
  */
 export function parseCreateUserBody(body) {
     const payload = body || {};
-    const name = normalizeOptionalString(payload.name, 'name');
+    const name = normalizeString(payload.name, 'name');
     const email = normalizeOptionalEmail(payload.email);
 
     return {
@@ -41,7 +41,7 @@ export function parseUpdateUserBody(body) {
     const result = {};
 
     if (Object.hasOwn(payload, 'name')) {
-        result.name = normalizeOptionalString(payload.name, 'name');
+        result.name = normalizeString(payload.name, 'name');
     }
 
     if (Object.hasOwn(payload, 'email')) {
@@ -89,13 +89,13 @@ export function parseListUsersQuery(query) {
  * @param {string} field
  * @returns {string | undefined}
  */
-function normalizeOptionalString(value, field) {
+function normalizeString(value, field) {
     if (value === undefined) {
-        return undefined;
+        throw new HttpError(400, `${field} is required.`);
     }
 
     if (typeof value !== 'string' || value.trim().length === 0) {
-        throw new HttpError(400, `${field} must be a non-empty string when provided.`);
+        throw new HttpError(400, `${field} must be a non-empty string.`);
     }
 
     return value.trim();

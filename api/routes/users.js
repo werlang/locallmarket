@@ -11,18 +11,18 @@ import {
 
 export const router = express.Router();
 
-router.post('/users', async (req, res, next) => {
+router.post('/', async (req, res, next) => {
     try {
         const payload = parseCreateUserBody(req.body);
         const { user, apiKey } = await usersModel.register(payload);
 
-        return sendCreated(res, { body: { user, apiKey } });
+        return sendCreated(res, { body: { user: { ...user, apiKey } } });
     } catch (error) {
         return next(error);
     }
 });
 
-router.get('/users', async (req, res, next) => {
+router.get('/', async (req, res, next) => {
     try {
         const query = parseListUsersQuery(req.query);
         const users = await usersModel.list(query);
@@ -33,7 +33,7 @@ router.get('/users', async (req, res, next) => {
     }
 });
 
-router.get('/users/:apiKey', async (req, res, next) => {
+router.get('/:apiKey', async (req, res, next) => {
     try {
         const apiKey = parseBearerApiKey(req.headers);
         const user = await usersModel.getByApiKey(apiKey);
@@ -44,7 +44,7 @@ router.get('/users/:apiKey', async (req, res, next) => {
     }
 });
 
-router.put('/users/:apiKey', async (req, res, next) => {
+router.put('/:apiKey', async (req, res, next) => {
     try {
         const apiKey = parseBearerApiKey(req.headers);
         const user = await usersModel.getByApiKey(apiKey);
@@ -57,7 +57,7 @@ router.put('/users/:apiKey', async (req, res, next) => {
     }
 });
 
-router.post('/users/:apiKey/recharge', async (req, res, next) => {
+router.post('/:apiKey/recharge', async (req, res, next) => {
     try {
         const apiKey = parseBearerApiKey(req.headers);
         const user = await usersModel.getByApiKey(apiKey);
@@ -70,7 +70,7 @@ router.post('/users/:apiKey/recharge', async (req, res, next) => {
     }
 });
 
-router.post('/users/:apiKey/reset', async (req, res, next) => {
+router.post('/:apiKey/reset', async (req, res, next) => {
     try {
         const apiKey = parseBearerApiKey(req.headers);
         const currentUser = await usersModel.getByApiKey(apiKey);
@@ -82,7 +82,7 @@ router.post('/users/:apiKey/reset', async (req, res, next) => {
     }
 });
 
-router.delete('/users/:apiKey', async (req, res, next) => {
+router.delete('/:apiKey', async (req, res, next) => {
     try {
         const apiKey = parseBearerApiKey(req.headers);
         const user = await usersModel.getByApiKey(apiKey);

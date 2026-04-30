@@ -12,9 +12,23 @@ services:
     networks:
       - llm
     command: npm start
-
+  mysql:
+    image: mysql:8.2
+    restart: unless-stopped
+    environment:
+        - MYSQL_DATABASE=${MYSQL_DATABASE}
+        - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
+    ports:
+        - 3306:3306
+    volumes:
+        - mysql:/var/lib/mysql
+        - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql
+        - .:/app
+    networks:
+        - llm
 volumes:
   node_modules_api:
+  mysql:
 networks:
   llm:
     name: llm
