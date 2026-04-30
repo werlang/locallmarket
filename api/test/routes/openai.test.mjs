@@ -10,6 +10,7 @@ function makeMockRes() {
     const written = [];
     let headersSent = false;
     let writableEnded = false;
+    let flushed = false;
     const closeListeners = [];
 
     return {
@@ -17,7 +18,7 @@ function makeMockRes() {
         get writableEnded() { return writableEnded; },
         status() { return this; },
         setHeader(name, value) { headers[name] = value; return this; },
-        flushHeaders() { headersSent = true; return this; },
+        flushHeaders() { headersSent = true; flushed = true; return this; },
         write(chunk) { written.push(String(chunk)); return true; },
         end() { writableEnded = true; },
         once(event, handler) {
@@ -30,6 +31,7 @@ function makeMockRes() {
                 handler();
             }
         },
+        get _flushed() { return flushed; },
         _headers: headers,
         _written: written
     };
@@ -155,6 +157,12 @@ test('openAiRouterFactory /chat/completions auto-matches worker, creates interna
 
     calls.enqueued[0].stream.event('message').send('Hi from worker');
     calls.enqueued[0].stream.event('end').send('done');
+
+    assert.equal(res._headers['Content-Type'], 'text/event-stream; charset=utf-8');
+    assert.equal(res._headers['Cache-Control'], 'no-cache, no-transform');
+    assert.equal(res._headers.Connection, 'keep-alive');
+    assert.equal(res._headers['X-Accel-Buffering'], 'no');
+    assert.equal(res._flushed, true);
 
     const raw = res._written.join('');
     assert.ok(raw.includes('"object":"chat.completion.chunk"'));

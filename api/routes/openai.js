@@ -1,6 +1,7 @@
 import express from 'express';
 import { parseBearerApiKey } from '../helpers/auth.js';
 import { HttpError } from '../helpers/error.js';
+import { applyStreamHeaders } from '../helpers/stream.js';
 import { ordersModel } from '../models/orders.js';
 import { usersModel } from '../models/users.js';
 
@@ -87,7 +88,7 @@ export function openAiRouterFactory({ streamRouter }) {
 /**
  * Validates an OpenAI-compatible chat/completions payload.
  * @param {any} body
- * @returns {{ model: string, prompt: string, stream: true }}
+ * @returns {{ model: string, prompt: string }}
  */
 function parseChatCompletionsBody(body) {
     const payload = body || {};
@@ -127,8 +128,7 @@ function parseChatCompletionsBody(body) {
 
     return {
         model: payload.model.trim(),
-        prompt,
-        stream: true
+        prompt
     };
 }
 
@@ -172,15 +172,7 @@ class OpenAiChatCompletionsStream {
      * @param {{ res: import('express').Response, model: string }} input
      */
     constructor({ res, model }) {
-        res.status(200);
-        res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-        res.setHeader('Cache-Control', 'no-cache, no-transform');
-        res.setHeader('Connection', 'keep-alive');
-        res.setHeader('X-Accel-Buffering', 'no');
-
-        if (typeof res.flushHeaders === 'function') {
-            res.flushHeaders();
-        }
+        applyStreamHeaders(res);
 
         this.#res = res;
         this.#closed = false;

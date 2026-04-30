@@ -5,15 +5,7 @@ export class HttpStream {
     #closed;
 
     constructor(res) {
-        res.status(200);
-        res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-        res.setHeader('Cache-Control', 'no-cache, no-transform');
-        res.setHeader('Connection', 'keep-alive');
-        res.setHeader('X-Accel-Buffering', 'no');
-
-        if (typeof res.flushHeaders === 'function') {
-            res.flushHeaders();
-        }
+        applyStreamHeaders(res);
 
         this.#res = res;
         this.#event = 'message';
@@ -63,4 +55,20 @@ export class HttpStream {
     get closed() {
         return this.#closed || this.#res.writableEnded;
     }
+}
+
+/**
+ * Applies common SSE headers and status to an Express response.
+ * @param {import('express').Response} res
+ */
+export function applyStreamHeaders(res) {
+        res.status(200);
+        res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+        res.setHeader('Cache-Control', 'no-cache, no-transform');
+        res.setHeader('Connection', 'keep-alive');
+        res.setHeader('X-Accel-Buffering', 'no');
+
+        if (typeof res.flushHeaders === 'function') {
+            res.flushHeaders();
+        }
 }
