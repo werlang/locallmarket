@@ -36,16 +36,22 @@ class SocketStream {
 export class ApiStreamClient {
 
     /**
-     * @param {{ url?: string, workerId?: string, apiKey?: string }} options
+     * @param {{ url?: string, workerId?: string, apiKey?: string, model?: string, tps?: number, price?: number }} options
      */
     constructor({
         url = 'ws://127.0.0.1:3000/ws/workers',
         workerId = `worker-${randomUUID()}`,
-        apiKey = process.env.WORKER_USER_API_KEY
+        apiKey = process.env.WORKER_USER_API_KEY,
+        model = process.env.WORKER_MODEL,
+        tps = process.env.WORKER_TPS ? Number(process.env.WORKER_TPS) : undefined,
+        price = process.env.WORKER_PRICE ? Number(process.env.WORKER_PRICE) : undefined
     } = {}) {
         this.url = url;
         this.workerId = workerId;
         this.apiKey = typeof apiKey === 'string' ? apiKey.trim() : '';
+        this.model = typeof model === 'string' ? model.trim() : '';
+        this.tps = Number.isFinite(tps) ? tps : null;
+        this.price = Number.isFinite(price) ? price : null;
         this.socket = null;
         this.busy = false;
         this.currentJobId = null;
@@ -96,11 +102,20 @@ export class ApiStreamClient {
             return;
         }
 
+        if (!this.model || this.tps == null || this.price == null) {
+            console.error('WORKER_MODEL, WORKER_TPS, and WORKER_PRICE are required for worker registration. Closing socket.');
+            socket.close();
+            return;
+        }
+
         console.log(`Connected to API WebSocket ${this.url} as ${this.workerId}`);
         this.reconnectDelayMs = DEFAULT_RECONNECT_DELAY_MS;
         this.sendToSocket(socket, 'worker-register', {
             workerId: this.workerId,
-            apiKey: this.apiKey
+            apiKey: this.apiKey,
+            model: this.model,
+            tps: this.tps,
+            price: this.price
         });
         this.sendReady();
     }

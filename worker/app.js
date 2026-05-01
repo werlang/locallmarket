@@ -10,7 +10,10 @@ const host = '0.0.0.0';
 
 const apiClient = new ApiStreamClient({
     url: process.env.API_WS_URL,
-    apiKey: process.env.WORKER_USER_API_KEY
+    apiKey: process.env.WORKER_USER_API_KEY,
+    model: process.env.WORKER_MODEL,
+    tps: process.env.WORKER_TPS ? Number(process.env.WORKER_TPS) : undefined,
+    price: process.env.WORKER_PRICE ? Number(process.env.WORKER_PRICE) : undefined
 });
 
 app.use(express.json());
