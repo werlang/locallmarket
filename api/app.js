@@ -29,9 +29,6 @@ const streamRouter = new StreamRouter({
     ordersModel
 });
 
-// Wire dependencies
-ordersModel.streamRouter = streamRouter;
-
 /**
  * Summarize API readiness and worker capacity for health checks.
  * @returns {{ ok: boolean, connectedWorkers: number, availableWorkers: number, activeJobs: number, queuedJobs: number }}
