@@ -22,8 +22,8 @@ Core design constraints:
 
 ### Worker Registration and Binding
 
-1. A provider registers a user account via `POST /users/users`, which generates a unique `api_key`.
-2. The worker service connects to the API WebSocket endpoint (`ws://.../ws/workers`) and sends a `worker-register` message with its `workerId` and the user's `api_key` in the payload.
+1. A provider registers a user account via `POST /users/users`, which generates a unique API key.
+2. The worker service connects to the API WebSocket endpoint (`ws://.../ws/workers`) and sends a `worker-register` message with its `workerId` and the user's API key in the payload.
 3. The API validates the API key against the registered user and permanently binds the worker to that user. The binding is immutable: once a worker is bound to a user, the binding cannot be changed, protecting against hijacking attacks under concurrent registration attempts.
 4. Bound workers are recorded in the `workers` table with `user_id` ownership and status tracking (`connected`, `disconnected`).
 
@@ -101,7 +101,7 @@ On successful registration:
 - Worker status transitions to `connected`.
 - Orders owned by the same user are eligible for auto-matching with this worker.
 
-Security: Worker-to-user binding is immutable after initial registration. Duplicate registration attempts for the same `workerId` by different API keys will be rejected, preventing accidental or malicious worker hijacking.
+Security: API keys are stored encrypted at rest with AES-256-GCM and indexed by a keyed lookup digest, so request-time authentication remains a cheap indexed lookup instead of plaintext comparison. Worker-to-user binding is immutable after initial registration. Duplicate registration attempts for the same `workerId` by different API keys will be rejected, preventing accidental or malicious worker hijacking.
 
 Concurrency safety detail: after upsert, ownership is re-read from persistence and compared with the authenticated user. If ownership does not match, registration is rejected.
 
@@ -220,6 +220,10 @@ Routes, models, helpers, and middleware must not embed raw SQL. If persistence b
 ### Schema Management
 
 MySQL is opt-in. When `MYSQL_ENABLED=false` (the default), the API starts without a database and persistence-backed routes (users, workers pool, OpenAI order-backed dispatch) return `503`. Set `MYSQL_ENABLED=true` and provide connection env vars to enable persistence.
+
+API key encryption requires `API_KEY_ENCRYPTION_SECRET` in the API environment. Use a long random secret and keep it stable across restarts so stored keys remain decryptable.
+
+For existing databases, apply `api/migrations/20260430_encrypt_user_api_keys_phase1.sql`, run `node scripts/migrate-user-api-keys.mjs` from `api/`, then apply `api/migrations/20260430_encrypt_user_api_keys_phase2.sql`.
 
 Do not create or alter schema at application startup. Apply schema changes through versioned SQL scripts/migrations and run them manually on the target connection.
 

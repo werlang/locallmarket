@@ -1,6 +1,7 @@
 import { randomBytes, randomUUID } from 'crypto';
 import { HttpError } from '../helpers/error.js';
 import { Mysql } from '../helpers/mysql.js';
+import { computeApiKeyLookupHash, createApiKeyRecord } from '../helpers/secure-key.js';
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -39,7 +40,7 @@ export class UsersModel {
                 const apiKey = generateApiKey();
                 const record = {
                     id,
-                    api_key: apiKey,
+                    ...createApiKeyRecord(apiKey),
                     ...(input.name !== undefined ? { name: input.name } : {}),
                     ...(input.email !== undefined ? { email: input.email } : {})
                 };
@@ -48,7 +49,7 @@ export class UsersModel {
 
                 return { user, apiKey };
             } catch (error) {
-                if (isDuplicateEntryError(error) && isDuplicateFieldError(error, 'api_key')) {
+                if (isDuplicateApiKeyError(error)) {
                     continue;
                 }
 
@@ -176,11 +177,11 @@ export class UsersModel {
             const apiKey = generateApiKey();
 
             try {
-                await Mysql.update('users', { api_key: apiKey }, user.id);
+                await Mysql.update('users', createApiKeyRecord(apiKey), user.id);
                 const refreshed = await this.getByIdOrNull(user.id);
                 return { user: refreshed, apiKey };
             } catch (error) {
-                if (isDuplicateEntryError(error) && isDuplicateFieldError(error, 'api_key')) {
+                if (isDuplicateApiKeyError(error)) {
                     continue;
                 }
 
@@ -218,7 +219,7 @@ export class UsersModel {
      */
     async getByApiKeyOrNull(apiKey) {
         const user = await Mysql.findOne('users', {
-            filter: { api_key: apiKey },
+            filter: { api_key_lookup_hash: computeApiKeyLookupHash(apiKey) },
             view: [
                 'id',
                 'name',
@@ -268,6 +269,15 @@ function isDuplicateEntryError(error) {
 function isDuplicateFieldError(error, field) {
     const message = error?.message || error?.data?.error?.message || '';
     return typeof message === 'string' && message.includes(field);
+}
+
+/**
+ * @param {any} error
+ */
+function isDuplicateApiKeyError(error) {
+    return isDuplicateEntryError(error)
+        && (isDuplicateFieldError(error, 'api_key_lookup_hash')
+            || isDuplicateFieldError(error, 'api_key'));
 }
 
 /**

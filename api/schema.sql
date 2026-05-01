@@ -1,6 +1,7 @@
 CREATE TABLE IF NOT EXISTS users (
     id VARCHAR(128) NOT NULL,
-    api_key VARCHAR(128) NOT NULL,
+    api_key_ciphertext TEXT NOT NULL,
+    api_key_lookup_hash CHAR(64) NOT NULL,
     name VARCHAR(120) NULL,
     email VARCHAR(255) NULL,
     max_price DECIMAL(18, 6) NULL,
@@ -9,7 +10,7 @@ CREATE TABLE IF NOT EXISTS users (
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (id),
-    UNIQUE KEY uniq_users_api_key (api_key)
+    UNIQUE KEY uniq_users_api_key_lookup_hash (api_key_lookup_hash)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
 
 CREATE TABLE IF NOT EXISTS workers (
