@@ -76,7 +76,10 @@ test('bindConnectedWorker rejects rebinding another user\'s worker id', async ()
                 return {
                     id: 'worker-1',
                     user_id: 'user-2',
-                    status: 'connected',
+                    model: 'llama3',
+                    tps: 20,
+                    price: 1.5,
+                    status: 'available',
                     connected_at: '2026-04-30T10:00:00.000Z',
                     disconnected_at: null,
                     last_seen_at: '2026-04-30T10:00:00.000Z',
@@ -93,7 +96,7 @@ test('bindConnectedWorker rejects rebinding another user\'s worker id', async ()
     });
 
     await assert.rejects(
-        () => model.bindConnectedWorker({ workerId: 'worker-1', apiKey: 'a'.repeat(64) }),
+        () => model.bindConnectedWorker({ workerId: 'worker-1', apiKey: 'a'.repeat(64), model: 'llama3', tps: 20, price: 1.5 }),
         /already belongs to another user/
     );
 });
@@ -112,7 +115,10 @@ test('bindConnectedWorker persists a connected worker under the resolved owner',
             return {
                 id: 'worker-1',
                 user_id: 'user-1',
-                status: 'connected',
+                model: 'llama3',
+                tps: 20,
+                price: '1.500000',
+                status: 'available',
                 connected_at: '2026-04-30T10:00:00.000Z',
                 disconnected_at: null,
                 last_seen_at: '2026-04-30T10:00:00.000Z',
@@ -132,17 +138,23 @@ test('bindConnectedWorker persists a connected worker under the resolved owner',
         }
     });
 
-    const result = await model.bindConnectedWorker({ workerId: ' worker-1 ', apiKey: 'a'.repeat(64) });
+    const result = await model.bindConnectedWorker({ workerId: ' worker-1 ', apiKey: 'a'.repeat(64), model: 'llama3', tps: 20, price: 1.5 });
 
     assert.equal(upsertCalls.length, 1);
     assert.equal(upsertCalls[0].table, 'workers');
     assert.equal(upsertCalls[0].data.id, 'worker-1');
     assert.equal(upsertCalls[0].data.user_id, 'user-1');
-    assert.equal(upsertCalls[0].data.status, 'connected');
+    assert.equal(upsertCalls[0].data.model, 'llama3');
+    assert.equal(upsertCalls[0].data.tps, 20);
+    assert.equal(upsertCalls[0].data.price, 1.5);
+    assert.equal(upsertCalls[0].data.status, 'available');
     assert.equal(typeof upsertCalls[0].data.connected_at.toSqlString, 'function');
     assert.equal(result.user.id, 'user-1');
     assert.equal(result.worker.id, 'worker-1');
     assert.equal(result.worker.userId, 'user-1');
+    assert.equal(result.worker.model, 'llama3');
+    assert.equal(result.worker.tps, 20);
+    assert.equal(result.worker.price, 1.5);
 });
 
 test('bindConnectedWorker reconnect keeps ownership immutable and only updates lifecycle fields', async () => {
@@ -150,7 +162,10 @@ test('bindConnectedWorker reconnect keeps ownership immutable and only updates l
     const existingRow = {
         id: 'worker-immutable',
         user_id: 'user-1',
-        status: 'connected',
+        model: 'llama3',
+        tps: 20,
+        price: '1.500000',
+        status: 'available',
         connected_at: '2026-04-30T10:00:00.000Z',
         disconnected_at: null,
         last_seen_at: '2026-04-30T10:00:00.000Z',
@@ -176,14 +191,18 @@ test('bindConnectedWorker reconnect keeps ownership immutable and only updates l
         }
     });
 
-    const result = await model.bindConnectedWorker({ workerId: 'worker-immutable', apiKey: 'a'.repeat(64) });
+    const result = await model.bindConnectedWorker({ workerId: 'worker-immutable', apiKey: 'a'.repeat(64), model: 'llama3', tps: 20, price: 1.5 });
 
     assert.equal(upsertCalls.length, 1);
     assert.equal(upsertCalls[0].table, 'workers');
     assert.equal(upsertCalls[0].data.user_id, 'user-1');
-    assert.deepEqual(upsertCalls[0].options.updateFields, ['status', 'connected_at', 'disconnected_at', 'last_seen_at']);
-    assert.equal(upsertCalls[0].options.updateFields.includes('user_id'), false);
-    assert.equal(upsertCalls[0].data.status, 'connected');
+    assert.equal(upsertCalls[0].data.model, 'llama3');
+    assert.equal(upsertCalls[0].data.status, 'available');
+    assert.ok(upsertCalls[0].options.updateFields.includes('model'));
+    assert.ok(upsertCalls[0].options.updateFields.includes('tps'));
+    assert.ok(upsertCalls[0].options.updateFields.includes('price'));
+    assert.ok(upsertCalls[0].options.updateFields.includes('status'));
+    assert.ok(upsertCalls[0].options.updateFields.includes('connected_at'));
     assert.equal(typeof upsertCalls[0].data.connected_at.toSqlString, 'function');
     assert.equal(typeof upsertCalls[0].data.last_seen_at.toSqlString, 'function');
     assert.equal(upsertCalls[0].data.disconnected_at, null);
@@ -208,7 +227,10 @@ test('bindConnectedWorker rejects if ownership changes during concurrent registr
             return {
                 id: 'worker-race',
                 user_id: 'user-2',
-                status: 'connected',
+                model: 'llama3',
+                tps: 20,
+                price: '1.500000',
+                status: 'available',
                 connected_at: '2026-04-30T10:00:00.000Z',
                 disconnected_at: null,
                 last_seen_at: '2026-04-30T10:00:00.000Z',
@@ -228,7 +250,7 @@ test('bindConnectedWorker rejects if ownership changes during concurrent registr
     });
 
     await assert.rejects(
-        () => model.bindConnectedWorker({ workerId: 'worker-race', apiKey: 'a'.repeat(64) }),
+        () => model.bindConnectedWorker({ workerId: 'worker-race', apiKey: 'a'.repeat(64), model: 'llama3', tps: 20, price: 1.5 }),
         /already belongs to another user/
     );
 
@@ -256,7 +278,7 @@ test('markDisconnected persists disconnect timestamps by worker id', async () =>
     assert.equal(typeof updateCalls[0].data.last_seen_at.toSqlString, 'function');
 });
 
-test('listPoolByOwner returns owner-scoped workers with latest offer details', async () => {
+test('listPoolByOwner returns owner-scoped workers with runtime state', async () => {
     const mysqlCalls = [];
     const model = new WorkersModel({
         mysql: createMysqlStub({
@@ -268,9 +290,12 @@ test('listPoolByOwner returns owner-scoped workers with latest offer details', a
                         {
                             id: 'worker-1',
                             user_id: 'owner-1',
-                            status: 'disconnected',
+                            model: 'llama3',
+                            tps: 61,
+                            price: '3.250000',
+                            status: 'available',
                             connected_at: '2026-04-30T10:00:00.000Z',
-                            disconnected_at: '2026-04-30T12:00:00.000Z',
+                            disconnected_at: null,
                             last_seen_at: '2026-04-30T12:00:00.000Z',
                             created_at: '2026-04-30T10:00:00.000Z',
                             updated_at: '2026-04-30T12:00:00.000Z'
@@ -278,39 +303,15 @@ test('listPoolByOwner returns owner-scoped workers with latest offer details', a
                         {
                             id: 'worker-2',
                             user_id: 'owner-1',
+                            model: null,
+                            tps: null,
+                            price: null,
                             status: 'disconnected',
                             connected_at: '2026-04-30T10:00:00.000Z',
                             disconnected_at: '2026-04-30T12:00:00.000Z',
                             last_seen_at: '2026-04-30T12:00:00.000Z',
                             created_at: '2026-04-30T10:00:00.000Z',
                             updated_at: '2026-04-30T12:00:00.000Z'
-                        }
-                    ];
-                }
-
-                if (table === 'orders') {
-                    return [
-                        {
-                            id: 20,
-                            worker_id: 'worker-1',
-                            model: 'model-latest',
-                            price: '3.250000',
-                            tps: 61,
-                            is_available: 1,
-                            is_consumed: 0,
-                            created_at: '2026-04-30T10:00:00.000Z',
-                            updated_at: '2026-04-30T13:00:00.000Z'
-                        },
-                        {
-                            id: 10,
-                            worker_id: 'worker-1',
-                            model: 'model-older',
-                            price: '2.500000',
-                            tps: 45,
-                            is_available: 1,
-                            is_consumed: 0,
-                            created_at: '2026-04-30T09:00:00.000Z',
-                            updated_at: '2026-04-30T11:00:00.000Z'
                         }
                     ];
                 }
@@ -326,30 +327,23 @@ test('listPoolByOwner returns owner-scoped workers with latest offer details', a
         ]
     });
 
-    assert.equal(mysqlCalls.length, 2);
+    assert.equal(mysqlCalls.length, 1);
     assert.equal(mysqlCalls[0].table, 'workers');
     assert.deepEqual(mysqlCalls[0].options.filter, { user_id: 'owner-1' });
-    assert.equal(mysqlCalls[1].table, 'orders');
-    assert.deepEqual(mysqlCalls[1].options.filter, {
-        user_id: 'owner-1',
-        is_available: 1,
-        is_consumed: 0
-    });
 
     assert.equal(result.length, 2);
     assert.deepEqual(result[0], {
         id: 'worker-1',
         userId: 'owner-1',
+        model: 'llama3',
+        tps: 61,
+        price: 3.25,
         status: 'busy',
         connected: true,
         available: false,
         activeJobId: 'job-55',
-        model: 'model-latest',
-        price: 3.25,
-        tps: 61,
-        offerId: 20,
         connectedAt: '2026-04-30T10:00:00.000Z',
-        disconnectedAt: '2026-04-30T12:00:00.000Z',
+        disconnectedAt: null,
         lastSeenAt: '2026-04-30T12:00:00.000Z',
         createdAt: '2026-04-30T10:00:00.000Z',
         updatedAt: '2026-04-30T12:00:00.000Z'
@@ -358,14 +352,13 @@ test('listPoolByOwner returns owner-scoped workers with latest offer details', a
     assert.deepEqual(result[1], {
         id: 'worker-2',
         userId: 'owner-1',
+        model: null,
+        tps: null,
+        price: null,
         status: 'disconnected',
         connected: false,
         available: false,
         activeJobId: null,
-        model: null,
-        price: null,
-        tps: null,
-        offerId: null,
         connectedAt: '2026-04-30T10:00:00.000Z',
         disconnectedAt: '2026-04-30T12:00:00.000Z',
         lastSeenAt: '2026-04-30T12:00:00.000Z',
@@ -392,7 +385,10 @@ test('listPool returns public data for workers across owners', async () => {
                         {
                             id: 'worker-1',
                             user_id: 'owner-1',
-                            status: 'connected',
+                            model: 'gpt-oss',
+                            tps: 33,
+                            price: '2.000000',
+                            status: 'available',
                             connected_at: '2026-04-30T10:00:00.000Z',
                             disconnected_at: null,
                             last_seen_at: '2026-04-30T12:00:00.000Z',
@@ -402,28 +398,15 @@ test('listPool returns public data for workers across owners', async () => {
                         {
                             id: 'worker-2',
                             user_id: 'owner-2',
+                            model: null,
+                            tps: null,
+                            price: null,
                             status: 'disconnected',
                             connected_at: '2026-04-30T10:00:00.000Z',
                             disconnected_at: '2026-04-30T11:00:00.000Z',
                             last_seen_at: '2026-04-30T11:00:00.000Z',
                             created_at: '2026-04-30T10:00:00.000Z',
                             updated_at: '2026-04-30T11:00:00.000Z'
-                        }
-                    ];
-                }
-
-                if (table === 'orders') {
-                    return [
-                        {
-                            id: 55,
-                            worker_id: 'worker-1',
-                            model: 'gpt-oss',
-                            price: '2.000000',
-                            tps: 33,
-                            is_available: 1,
-                            is_consumed: 0,
-                            created_at: '2026-04-30T10:00:00.000Z',
-                            updated_at: '2026-04-30T12:00:00.000Z'
                         }
                     ];
                 }
@@ -442,14 +425,14 @@ test('listPool returns public data for workers across owners', async () => {
     assert.equal(pool.length, 2);
     assert.deepEqual(pool[0], {
         id: 'worker-1',
-        status: 'connected',
+        userId: 'owner-1',
+        model: 'gpt-oss',
+        tps: 33,
+        price: 2,
+        status: 'available',
         connected: true,
         available: true,
         activeJobId: null,
-        model: 'gpt-oss',
-        price: 2,
-        tps: 33,
-        offerId: 55,
         connectedAt: '2026-04-30T10:00:00.000Z',
         disconnectedAt: null,
         lastSeenAt: '2026-04-30T12:00:00.000Z',
@@ -457,10 +440,10 @@ test('listPool returns public data for workers across owners', async () => {
         updatedAt: '2026-04-30T12:00:00.000Z'
     });
     assert.equal(pool[1].id, 'worker-2');
-    assert.equal(Object.hasOwn(pool[1], 'userId'), false);
+    assert.equal(pool[1].userId, 'owner-2');
 });
 
-test('updatePerformanceTps persists observed TPS for the worker model offer', async () => {
+test('updatePerformanceTps persists observed TPS on the worker row', async () => {
     const updateCalls = [];
     const model = new WorkersModel({
         mysql: createMysqlStub({
@@ -472,7 +455,6 @@ test('updatePerformanceTps persists observed TPS for the worker model offer', as
 
     const observed = await model.updatePerformanceTps({
         workerId: ' worker-7 ',
-        model: ' llama ',
         usage: { completion_tokens: 90 },
         startedAtMs: 1000,
         completedAtMs: 4000
@@ -480,14 +462,9 @@ test('updatePerformanceTps persists observed TPS for the worker model offer', as
 
     assert.equal(observed, 30);
     assert.equal(updateCalls.length, 1);
-    assert.equal(updateCalls[0].table, 'orders');
+    assert.equal(updateCalls[0].table, 'workers');
     assert.deepEqual(updateCalls[0].data, { tps: 30 });
-    assert.deepEqual(updateCalls[0].filter, {
-        worker_id: 'worker-7',
-        model: 'llama',
-        is_available: 1,
-        is_consumed: 0
-    });
+    assert.deepEqual(updateCalls[0].filter, { id: 'worker-7' });
 });
 
 test('updatePerformanceTps returns null and skips persistence when metrics are incomplete', async () => {

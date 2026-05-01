@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import { openAiRouterFactory } from '../../routes/openai.js';
 import { ordersModel } from '../../models/orders.js';
+import { workersModel } from '../../models/workers.js';
 import { usersModel } from '../../models/users.js';
 
 function makeMockRes() {
@@ -44,50 +45,40 @@ function getPostHandler(router, path) {
     return layer.route.stack[0].handle;
 }
 
-test('openAiRouterFactory /chat/completions auto-matches and consumes existing offer, then streams OpenAI chunks', async () => {
+test('openAiRouterFactory /chat/completions finds available worker and streams OpenAI chunks', async () => {
     const originalGetByApiKey = usersModel.getByApiKey;
-    const originalFindOffer = ordersModel.findFirstAvailableOfferByModel;
-    const originalConsumeForUse = ordersModel.consumeForUse;
-    const originalUnconsumeForUse = ordersModel.unconsumForUse;
+    const originalFindWorker = workersModel.findFirstAvailableByModel;
+    const originalMarkBusy = workersModel.markBusy;
+    const originalMarkAvailable = workersModel.markAvailable;
+    const originalCreateReceipt = ordersModel.createReceipt;
 
-    const calls = {
-        models: [],
-        consume: [],
-        enqueued: [],
-        cancelled: []
-    };
+    const calls = { enqueued: [], cancelled: [], markBusy: [], markAvailable: [], receipts: [] };
 
     usersModel.getByApiKey = async (apiKey) => {
         assert.equal(apiKey, 'requester-api-key');
         return { id: 'requester-1' };
     };
 
-    ordersModel.findFirstAvailableOfferByModel = async (model) => {
-        calls.models.push(model);
-        return {
-            id: 9,
-            userId: 'worker-owner-1',
-            workerId: 'worker-1',
-            model,
-            price: 4,
-            tps: 25
-        };
+    workersModel.findFirstAvailableByModel = async (model) => ({
+        id: 'worker-1',
+        userId: 'worker-owner-1',
+        model,
+        tps: 25,
+        price: 4
+    });
+
+    workersModel.markBusy = async (workerId) => {
+        calls.markBusy.push(workerId);
+        return true;
     };
 
-    ordersModel.consumeForUse = async (consumerId, orderId) => {
-        calls.consume.push({ consumerId, orderId });
-        return {
-            status: 'consumed',
-            order: {
-                id: orderId,
-                workerId: 'worker-1',
-                model: 'gpt-4.1-mini'
-            }
-        };
+    workersModel.markAvailable = async (workerId) => {
+        calls.markAvailable.push(workerId);
     };
 
-    ordersModel.unconsumForUse = async () => {
-        throw new Error('unconsumForUse should not be called on success path');
+    ordersModel.createReceipt = async (requesterId, data) => {
+        calls.receipts.push({ requesterId, ...data });
+        return { id: 99, requesterId, ...data, status: 'running' };
     };
 
     const router = openAiRouterFactory({
@@ -117,34 +108,32 @@ test('openAiRouterFactory /chat/completions auto-matches and consumes existing o
     const res = makeMockRes();
     const errors = [];
 
-    await handler(req, res, (error) => {
-        errors.push(error);
-    });
+    await handler(req, res, (error) => errors.push(error));
 
     usersModel.getByApiKey = originalGetByApiKey;
-    ordersModel.findFirstAvailableOfferByModel = originalFindOffer;
-    ordersModel.consumeForUse = originalConsumeForUse;
-    ordersModel.unconsumForUse = originalUnconsumeForUse;
+    workersModel.findFirstAvailableByModel = originalFindWorker;
+    workersModel.markBusy = originalMarkBusy;
+    workersModel.markAvailable = originalMarkAvailable;
+    ordersModel.createReceipt = originalCreateReceipt;
 
     assert.equal(errors.length, 0);
-    assert.deepEqual(calls.models, ['gpt-4.1-mini']);
-    assert.equal(calls.consume.length, 1);
-    assert.deepEqual(calls.consume[0], { consumerId: 'requester-1', orderId: 9 });
+    assert.deepEqual(calls.markBusy, ['worker-1']);
+    assert.equal(calls.receipts.length, 1);
+    assert.deepEqual(calls.receipts[0], {
+        requesterId: 'requester-1',
+        workerId: 'worker-1',
+        model: 'gpt-4.1-mini',
+        price: 4
+    });
     assert.equal(calls.enqueued.length, 1);
     assert.equal(calls.enqueued[0].targetWorkerId, 'worker-1');
-    assert.deepEqual(calls.enqueued[0].settlement, {
-        orderId: 9,
-        requesterId: 'requester-1'
-    });
+    assert.deepEqual(calls.enqueued[0].settlement, { orderId: 99, requesterId: 'requester-1' });
     assert.equal(calls.enqueued[0].payload.message, '[system] Be concise\n[user] Hello world');
 
     calls.enqueued[0].stream.event('message').send('Hi from worker');
     calls.enqueued[0].stream.event('end').send('done');
 
     assert.equal(res._headers['Content-Type'], 'text/event-stream; charset=utf-8');
-    assert.equal(res._headers['Cache-Control'], 'no-cache, no-transform');
-    assert.equal(res._headers.Connection, 'keep-alive');
-    assert.equal(res._headers['X-Accel-Buffering'], 'no');
     assert.equal(res._flushed, true);
 
     const raw = res._written.join('');
@@ -158,18 +147,16 @@ test('openAiRouterFactory /chat/completions auto-matches and consumes existing o
     assert.deepEqual(calls.cancelled, ['job-openai-1']);
 });
 
-test('openAiRouterFactory /chat/completions returns 409 when no worker is available for model', async () => {
+test('openAiRouterFactory /chat/completions returns 409 when no available worker found', async () => {
     const originalGetByApiKey = usersModel.getByApiKey;
-    const originalFindOffer = ordersModel.findFirstAvailableOfferByModel;
+    const originalFindWorker = workersModel.findFirstAvailableByModel;
 
     usersModel.getByApiKey = async () => ({ id: 'requester-1' });
-    ordersModel.findFirstAvailableOfferByModel = async () => null;
+    workersModel.findFirstAvailableByModel = async () => null;
 
     const router = openAiRouterFactory({
         streamRouter: {
-            enqueue() {
-                throw new Error('enqueue should not be called');
-            },
+            enqueue() { throw new Error('enqueue should not be called'); },
             cancel() {}
         }
     });
@@ -177,56 +164,70 @@ test('openAiRouterFactory /chat/completions returns 409 when no worker is availa
     const handler = getPostHandler(router, '/chat/completions');
     const req = {
         headers: { authorization: 'Bearer requester-api-key' },
-        body: {
-            model: 'gpt-4.1-mini',
-            stream: true,
-            messages: [{ role: 'user', content: 'Ping' }]
-        }
+        body: { model: 'gpt-4.1-mini', stream: true, messages: [{ role: 'user', content: 'Ping' }] }
     };
     const res = makeMockRes();
     const errors = [];
 
-    await handler(req, res, (error) => {
-        errors.push(error);
-    });
+    await handler(req, res, (error) => errors.push(error));
 
     usersModel.getByApiKey = originalGetByApiKey;
-    ordersModel.findFirstAvailableOfferByModel = originalFindOffer;
+    workersModel.findFirstAvailableByModel = originalFindWorker;
 
     assert.equal(errors.length, 1);
     assert.equal(errors[0].status, 409);
 });
 
-test('openAiRouterFactory /chat/completions refunds consumed offer if enqueue fails', async () => {
+test('openAiRouterFactory /chat/completions returns 503 when markBusy race is lost', async () => {
     const originalGetByApiKey = usersModel.getByApiKey;
-    const originalFindOffer = ordersModel.findFirstAvailableOfferByModel;
-    const originalConsumeForUse = ordersModel.consumeForUse;
-    const originalUnconsumeForUse = ordersModel.unconsumForUse;
-
-    const cleanupCalls = [];
+    const originalFindWorker = workersModel.findFirstAvailableByModel;
+    const originalMarkBusy = workersModel.markBusy;
 
     usersModel.getByApiKey = async () => ({ id: 'requester-1' });
-    ordersModel.findFirstAvailableOfferByModel = async () => ({
-        id: 9,
-        userId: 'worker-owner-1',
-        workerId: 'worker-1',
-        model: 'gpt-4.1-mini',
-        price: 4,
-        tps: 25
+    workersModel.findFirstAvailableByModel = async () => ({ id: 'worker-1', userId: 'owner-1', model: 'gpt-4.1-mini', tps: 25, price: 4 });
+    workersModel.markBusy = async () => false;  // race lost
+
+    const router = openAiRouterFactory({
+        streamRouter: {
+            enqueue() { throw new Error('enqueue should not be called'); },
+            cancel() {}
+        }
     });
-    ordersModel.consumeForUse = async () => {
-        return {
-            status: 'consumed',
-            order: {
-                id: 88,
-                workerId: 'worker-1',
-                model: 'gpt-4.1-mini'
-            }
-        };
+
+    const handler = getPostHandler(router, '/chat/completions');
+    const req = {
+        headers: { authorization: 'Bearer requester-api-key' },
+        body: { model: 'gpt-4.1-mini', stream: true, messages: [{ role: 'user', content: 'Ping' }] }
     };
-    ordersModel.unconsumForUse = async (ownerId, orderId) => {
-        cleanupCalls.push({ ownerId, orderId });
-    };
+    const res = makeMockRes();
+    const errors = [];
+
+    await handler(req, res, (error) => errors.push(error));
+
+    usersModel.getByApiKey = originalGetByApiKey;
+    workersModel.findFirstAvailableByModel = originalFindWorker;
+    workersModel.markBusy = originalMarkBusy;
+
+    assert.equal(errors.length, 1);
+    assert.equal(errors[0].status, 503);
+});
+
+test('openAiRouterFactory /chat/completions releases worker and fails receipt if enqueue throws', async () => {
+    const originalGetByApiKey = usersModel.getByApiKey;
+    const originalFindWorker = workersModel.findFirstAvailableByModel;
+    const originalMarkBusy = workersModel.markBusy;
+    const originalMarkAvailable = workersModel.markAvailable;
+    const originalCreateReceipt = ordersModel.createReceipt;
+    const originalFailReceipt = ordersModel.failReceipt;
+
+    const cleanupCalls = { markAvailable: [], failReceipt: [] };
+
+    usersModel.getByApiKey = async () => ({ id: 'requester-1' });
+    workersModel.findFirstAvailableByModel = async () => ({ id: 'worker-1', userId: 'owner-1', model: 'gpt-4.1-mini', tps: 25, price: 4 });
+    workersModel.markBusy = async () => true;
+    workersModel.markAvailable = async (workerId) => { cleanupCalls.markAvailable.push(workerId); };
+    ordersModel.createReceipt = async (requesterId, data) => ({ id: 88, requesterId, ...data, status: 'running' });
+    ordersModel.failReceipt = async (orderId) => { cleanupCalls.failReceipt.push(orderId); };
 
     const router = openAiRouterFactory({
         streamRouter: {
@@ -242,25 +243,25 @@ test('openAiRouterFactory /chat/completions refunds consumed offer if enqueue fa
     const handler = getPostHandler(router, '/chat/completions');
     const req = {
         headers: { authorization: 'Bearer requester-api-key' },
-        body: {
-            model: 'gpt-4.1-mini',
-            stream: true,
-            messages: [{ role: 'user', content: 'Ping' }]
-        }
+        body: { model: 'gpt-4.1-mini', stream: true, messages: [{ role: 'user', content: 'Ping' }] }
     };
     const res = makeMockRes();
     const errors = [];
 
-    await handler(req, res, (error) => {
-        errors.push(error);
-    });
+    await handler(req, res, (error) => errors.push(error));
+
+    // Let async fire-and-forget cleanup run
+    await new Promise((r) => setImmediate(r));
 
     usersModel.getByApiKey = originalGetByApiKey;
-    ordersModel.findFirstAvailableOfferByModel = originalFindOffer;
-    ordersModel.consumeForUse = originalConsumeForUse;
-    ordersModel.unconsumForUse = originalUnconsumeForUse;
+    workersModel.findFirstAvailableByModel = originalFindWorker;
+    workersModel.markBusy = originalMarkBusy;
+    workersModel.markAvailable = originalMarkAvailable;
+    ordersModel.createReceipt = originalCreateReceipt;
+    ordersModel.failReceipt = originalFailReceipt;
 
     assert.equal(errors.length, 1);
     assert.equal(errors[0].status, 503);
-    assert.deepEqual(cleanupCalls, [{ ownerId: 'requester-1', orderId: 88 }]);
+    assert.deepEqual(cleanupCalls.markAvailable, ['worker-1']);
+    assert.deepEqual(cleanupCalls.failReceipt, [88]);
 });

@@ -3,6 +3,7 @@ import { parseBearerApiKey } from '../helpers/auth.js';
 import { HttpError } from '../helpers/error.js';
 import { applyStreamHeaders } from '../helpers/stream.js';
 import { ordersModel } from '../models/orders.js';
+import { workersModel } from '../models/workers.js';
 import { usersModel } from '../models/users.js';
 
 /**
@@ -13,8 +14,9 @@ export function openAiRouterFactory({ streamRouter }) {
     const router = express.Router();
 
     router.post('/chat/completions', async (req, res, next) => {
+        let markedBusyWorkerId = null;
+        let createdReceiptId = null;
         let requesterId = null;
-        let consumedOrderId = null;
 
         try {
             const apiKey = parseBearerApiKey(req.headers);
@@ -22,56 +24,64 @@ export function openAiRouterFactory({ streamRouter }) {
             requesterId = requester.id;
             const payload = parseChatCompletionsBody(req.body);
 
-            const workerOffer = await ordersModel.findFirstAvailableOfferByModel(payload.model, {
+            // Find an available worker that matches the requested model and constraints
+            const worker = await workersModel.findFirstAvailableByModel(payload.model, {
                 maxPrice: requester.maxPrice,
-                minTps: requester.minTps
+                minTps: requester.minTps,
+                streamRouter
             });
-            if (!workerOffer) {
+            if (!worker) {
                 throw new HttpError(409, `No available worker found for model ${payload.model} within your price and TPS requirements.`);
             }
 
-            const consumed = await ordersModel.consumeForUse(requester.id, workerOffer.id);
-            consumedOrderId = consumed.order.id;
-            const stream = new OpenAiChatCompletionsStream({
-                res,
-                model: payload.model
+            // Atomically claim the worker; another concurrent request may have grabbed it first
+            const claimed = await workersModel.markBusy(worker.id);
+            if (!claimed) {
+                throw new HttpError(503, `Worker for model ${payload.model} became unavailable. Please retry.`);
+            }
+            markedBusyWorkerId = worker.id;
+
+            // Create the execution receipt before dispatching so billing is always traceable
+            const receipt = await ordersModel.createReceipt(requester.id, {
+                workerId: worker.id,
+                model: worker.model,
+                price: worker.price
             });
+            createdReceiptId = receipt.id;
+
+            const stream = new OpenAiChatCompletionsStream({ res, model: payload.model });
 
             const jobId = streamRouter.enqueue({
-                payload: {
-                    message: payload.prompt,
-                    model: consumed.order.model
-                },
+                payload: { message: payload.prompt, model: worker.model },
                 stream,
-                targetWorkerId: consumed.order.workerId,
-                settlement: {
-                    orderId: consumed.order.id,
-                    requesterId: requester.id
-                },
-                onJobAborted: async () => {
-                    try {
-                        await ordersModel.unconsumForUse(requester.id, consumed.order.id);
-                    } catch (refundError) {
-                        console.error('[openai.chat.completions] Compensation refund failed:', refundError);
-                    }
+                targetWorkerId: worker.id,
+                settlement: { orderId: receipt.id, requesterId: requester.id },
+                onJobAborted: () => {
+                    // Worker disconnected before the queued job was dispatched;
+                    // markDisconnected is handled by the router — only fail the receipt here.
+                    ordersModel.failReceipt(receipt.id).catch((err) => {
+                        console.error('[openai.chat.completions] failReceipt on abort failed:', err);
+                    });
 
                     if (!stream.closed) {
-                        stream.event('error').send(JSON.stringify({ error: 'Worker disconnected before processing. Order has been refunded.' }));
+                        stream.event('error').send(JSON.stringify({ error: 'Worker disconnected before processing.' }));
                         stream.close();
                     }
                 }
             });
 
-            res.once('close', () => {
-                streamRouter.cancel(jobId);
-            });
+            res.once('close', () => streamRouter.cancel(jobId));
         } catch (error) {
-            if (consumedOrderId !== null && requesterId !== null) {
-                try {
-                    await ordersModel.unconsumForUse(requesterId, consumedOrderId);
-                } catch {
-                    // Keep error contract deterministic; refund is best-effort cleanup.
-                }
+            // Release the worker and fail the receipt on any setup error
+            if (markedBusyWorkerId !== null) {
+                workersModel.markAvailable(markedBusyWorkerId).catch((err) => {
+                    console.error('[openai.chat.completions] markAvailable on error failed:', err);
+                });
+            }
+            if (createdReceiptId !== null) {
+                ordersModel.failReceipt(createdReceiptId).catch((err) => {
+                    console.error('[openai.chat.completions] failReceipt on error failed:', err);
+                });
             }
 
             return next(error);

@@ -119,6 +119,9 @@ describe('StreamRouter', () => {
             },
             async markDisconnected() {
                 return undefined;
+            },
+            async markAvailable() {
+                return undefined;
             }
         };
     }
@@ -320,7 +323,7 @@ describe('StreamRouter', () => {
             wsServer,
             workersModel: createWorkersModel(),
             ordersModel: {
-                async settleCompletedOrder(input) {
+                async completeReceipt(input) {
                     settlements.push(input);
                     return { status: 'settled' };
                 }
@@ -349,12 +352,11 @@ describe('StreamRouter', () => {
         await new Promise((resolve) => setImmediate(resolve));
 
         assert.equal(settlements.length, 1);
-        assert.deepEqual(settlements[0], {
-            orderId: 44,
-            requesterId: 'requester-1',
-            workerOwnerId: 'user-1',
-            usage: { total_tokens: 1200 }
-        });
+        assert.equal(settlements[0].orderId, 44);
+        assert.equal(settlements[0].requesterId, 'requester-1');
+        assert.equal(settlements[0].workerOwnerId, 'user-1');
+        assert.deepEqual(settlements[0].usage, { total_tokens: 1200 });
+        assert.ok(Number.isFinite(settlements[0].startedAtMs));
         assert.equal(router.getState().activeJobs, 0);
         assert.equal(router.getState().availableWorkers, 1);
     });

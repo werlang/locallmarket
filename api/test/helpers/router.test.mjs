@@ -200,6 +200,9 @@ test('job-complete persists observed worker TPS using completion usage and elaps
             async markDisconnected() {
                 return undefined;
             },
+            async markAvailable() {
+                return undefined;
+            },
             async updatePerformanceTps(input) {
                 updateCalls.push(input);
                 return 30;
@@ -237,7 +240,6 @@ test('job-complete persists observed worker TPS using completion usage and elaps
         assert.equal(updateCalls.length, 1);
         assert.deepEqual(updateCalls[0], {
             workerId: 'w-tps',
-            model: 'llama',
             usage: { completion_tokens: 60 },
             startedAtMs: 1000,
             completedAtMs: 3000

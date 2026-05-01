@@ -26,10 +26,9 @@ function makeMockRes() {
     };
 }
 
-test('workersRouterFactory GET /pool returns public worker pool details for all owners', async () => {
+test('workersRouterFactory GET / returns owner-scoped worker pool', async () => {
     const originalGetByApiKey = usersModel.getByApiKey;
     const workersModelCalls = [];
-    const snapshotCalls = [];
 
     usersModel.getByApiKey = async (apiKey) => {
         assert.equal(apiKey, 'owner-api-key');
@@ -38,19 +37,19 @@ test('workersRouterFactory GET /pool returns public worker pool details for all 
 
     const router = workersRouterFactory({
         workersModel: {
-            async listPool(options) {
-                workersModelCalls.push(options);
+            async listPoolByOwner(ownerId, options) {
+                workersModelCalls.push({ ownerId, options });
                 return [
                     {
                         id: 'worker-1',
-                        status: 'connected',
+                        userId: 'owner-1',
+                        model: 'llama3',
+                        tps: 42,
+                        price: 2.5,
+                        status: 'available',
                         connected: true,
                         available: true,
                         activeJobId: null,
-                        model: 'gpt-oss',
-                        price: 2.5,
-                        tps: 42,
-                        offerId: 101,
                         connectedAt: '2026-04-30T10:00:00.000Z',
                         disconnectedAt: null,
                         lastSeenAt: '2026-04-30T10:01:00.000Z',
@@ -62,62 +61,34 @@ test('workersRouterFactory GET /pool returns public worker pool details for all 
         },
         streamRouter: {
             getWorkersSnapshot(options) {
-                snapshotCalls.push(options);
                 return [{ id: 'worker-1', connected: true, available: true, activeJobId: null }];
             }
         }
     });
 
-    const handler = getRouteHandler(router, 'get', '/pool');
-    const req = {
-        headers: {
-            authorization: 'Bearer owner-api-key'
-        }
-    };
+    const handler = getRouteHandler(router, 'get', '/');
+    const req = { headers: { authorization: 'Bearer owner-api-key' } };
     const res = makeMockRes();
     const errors = [];
 
-    await handler(req, res, (error) => {
-        errors.push(error);
-    });
+    await handler(req, res, (error) => errors.push(error));
 
     usersModel.getByApiKey = originalGetByApiKey;
 
     assert.equal(errors.length, 0);
-    assert.deepEqual(snapshotCalls, [undefined]);
     assert.equal(workersModelCalls.length, 1);
-    assert.deepEqual(workersModelCalls[0].runtimeWorkers, [
-        { id: 'worker-1', connected: true, available: true, activeJobId: null }
-    ]);
+    assert.equal(workersModelCalls[0].ownerId, 'owner-1');
     assert.equal(res.statusCode, 200);
-    assert.deepEqual(res.payload, {
-        ok: true,
-        workers: [
-            {
-                id: 'worker-1',
-                status: 'connected',
-                connected: true,
-                available: true,
-                activeJobId: null,
-                model: 'gpt-oss',
-                price: 2.5,
-                tps: 42,
-                offerId: 101,
-                connectedAt: '2026-04-30T10:00:00.000Z',
-                disconnectedAt: null,
-                lastSeenAt: '2026-04-30T10:01:00.000Z',
-                createdAt: '2026-04-30T09:00:00.000Z',
-                updatedAt: '2026-04-30T10:01:00.000Z'
-            }
-        ]
-    });
+    assert.equal(res.payload.ok, true);
+    assert.equal(res.payload.workers.length, 1);
+    assert.equal(res.payload.workers[0].id, 'worker-1');
 });
 
-test('workersRouterFactory GET /pool forwards auth failures to next', async () => {
+test('workersRouterFactory GET / forwards auth failures to next', async () => {
     const router = workersRouterFactory({
         workersModel: {
-            async listPool() {
-                throw new Error('listPool should not be called');
+            async listPoolByOwner() {
+                throw new Error('should not be called');
             }
         },
         streamRouter: {
@@ -127,15 +98,40 @@ test('workersRouterFactory GET /pool forwards auth failures to next', async () =
         }
     });
 
-    const handler = getRouteHandler(router, 'get', '/pool');
+    const handler = getRouteHandler(router, 'get', '/');
     const req = { headers: {} };
     const res = makeMockRes();
     const errors = [];
 
-    await handler(req, res, (error) => {
-        errors.push(error);
-    });
+    await handler(req, res, (error) => errors.push(error));
 
     assert.equal(errors.length, 1);
     assert.equal(errors[0].status, 401);
+});
+
+test('workersRouterFactory GET /public lists available workers without auth', async () => {
+    const router = workersRouterFactory({
+        workersModel: {
+            async listPublic() {
+                return [
+                    { id: 'worker-1', model: 'llama3', tps: 42, price: 2.5, status: 'available' }
+                ];
+            }
+        },
+        streamRouter: {}
+    });
+
+    const handler = getRouteHandler(router, 'get', '/public');
+    const req = { headers: {} };
+    const res = makeMockRes();
+    const errors = [];
+
+    await handler(req, res, (error) => errors.push(error));
+
+    assert.equal(errors.length, 0);
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(res.payload, {
+        ok: true,
+        workers: [{ id: 'worker-1', model: 'llama3', tps: 42, price: 2.5, status: 'available' }]
+    });
 });
