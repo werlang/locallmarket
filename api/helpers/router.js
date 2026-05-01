@@ -78,6 +78,7 @@ export class StreamRouter {
                 return;
             }
 
+            this.failJobReceiptIfNeeded(payload?.jobId);
             this.finishJob(payload?.jobId, {
                 workerId: worker.id,
                 errorMessage: payload?.error || 'Worker failed to process the request.'
@@ -121,12 +122,37 @@ export class StreamRouter {
 
     /**
      * Removes a queued request or marks an active one as client-disconnected.
+     * For queued jobs that were never dispatched, fires the abort callback and
+     * releases the reserved worker back to available status.
      * @param {string} jobId
      */
     cancel(jobId) {
         const queuedJob = this.queue.remove(jobId);
 
         if (queuedJob) {
+            if (typeof queuedJob.onJobAborted === 'function') {
+                try {
+                    queuedJob.onJobAborted();
+                } catch (error) {
+                    console.error('[StreamRouter] onJobAborted in cancel failed:', error);
+                }
+            }
+
+            // Release the targeted worker back to available (client cancelled, not a disconnect)
+            if (queuedJob.targetWorkerId && this.workersModel) {
+                const runtimeWorker = this.workers.get(queuedJob.targetWorkerId);
+                if (runtimeWorker && !runtimeWorker.jobId) {
+                    runtimeWorker.available = true;
+                }
+
+                this.workersModel.markAvailable(queuedJob.targetWorkerId).catch((error) => {
+                    console.error(
+                        `[${new Date().toISOString()}] Failed to release worker ${queuedJob.targetWorkerId} after cancel:`,
+                        error?.message || error
+                    );
+                });
+            }
+
             return;
         }
 
@@ -237,7 +263,7 @@ export class StreamRouter {
      * Otherwise, registers the worker locally (for testing/backward compatibility).
      *
      * @param {import('ws').WebSocket & { workerId?: string }} ws
-     * @param {{ workerId?: string, apiKey?: string }} payload
+     * @param {{ workerId?: string, apiKey?: string, model?: string, tps?: number, price?: number }} payload
      */
     async registerWorker(ws, payload) {
         let boundWorkerId;
@@ -248,7 +274,10 @@ export class StreamRouter {
             try {
                 const binding = await this.workersModel.bindConnectedWorker({
                     workerId: payload?.workerId,
-                    apiKey: payload?.apiKey
+                    apiKey: payload?.apiKey,
+                    model: payload?.model,
+                    tps: payload?.tps,
+                    price: payload?.price
                 });
                 boundWorkerId = binding.worker.id;
                 ownerUserId = binding.user.id;
@@ -366,6 +395,7 @@ export class StreamRouter {
         }
 
         if (activeJobId) {
+            this.failJobReceiptIfNeeded(activeJobId);
             this.finishJob(activeJobId, {
                 workerId,
                 errorMessage: 'Worker disconnected while streaming the request.'
@@ -559,10 +589,21 @@ export class StreamRouter {
         worker.jobId = null;
         worker.ws.activeJobId = null;
         worker.available = true;
+
+        // Persist availability back to DB (fire-and-forget)
+        if (this.workersModel) {
+            this.workersModel.markAvailable(workerId)
+                .catch((error) => {
+                    console.error(
+                        `[${new Date().toISOString()}] Failed to persist worker available for ${workerId}:`,
+                        error?.message || error
+                    );
+                });
+        }
     }
 
     /**
-     * Settles requester/worker-owner billing when a completed job was tied to an order.
+     * Settles requester/worker-owner billing when a completed job was tied to a receipt.
      * Returns null for non-order jobs so completion stays synchronous for legacy flows.
      *
      * @param {string | undefined} jobId
@@ -584,13 +625,36 @@ export class StreamRouter {
         }
 
         return this.ordersModel
-            .settleCompletedOrder({
+            .completeReceipt({
                 orderId: Number(job.settlement.orderId),
                 requesterId: String(job.settlement.requesterId),
                 workerOwnerId,
-                usage
+                usage,
+                startedAtMs: job.startedAtMs
             })
             .then(() => undefined);
+    }
+
+    /**
+     * Marks an execution receipt as failed when the job errors out.
+     * No-ops for jobs without settlement (legacy flows).
+     *
+     * @param {string | undefined} jobId
+     */
+    failJobReceiptIfNeeded(jobId) {
+        if (typeof jobId !== 'string') return;
+
+        const job = this.activeJobs.get(jobId);
+        if (!job || !job.settlement || !this.ordersModel) return;
+
+        this.ordersModel
+            .failReceipt(Number(job.settlement.orderId))
+            .catch((error) => {
+                console.error(
+                    `[${new Date().toISOString()}] failReceipt failed for job ${jobId}:`,
+                    error?.message || error
+                );
+            });
     }
 
     /**
@@ -611,18 +675,14 @@ export class StreamRouter {
         }
 
         const job = this.activeJobs.get(jobId);
-        const model = typeof job?.payload?.model === 'string' && job.payload.model.trim().length > 0
-            ? job.payload.model.trim()
-            : null;
 
-        if (!job || !model || !Number.isFinite(job.startedAtMs) || job.startedAtMs < 1) {
+        if (!job || !Number.isFinite(job.startedAtMs) || job.startedAtMs < 1) {
             return;
         }
 
         this.workersModel
             .updatePerformanceTps({
                 workerId: worker.id,
-                model,
                 usage,
                 startedAtMs: job.startedAtMs,
                 completedAtMs: Date.now()
