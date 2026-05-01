@@ -172,6 +172,84 @@ export class WorkersModel {
     }
 
     /**
+     * Lists public worker pool data across all owners.
+     * The response intentionally excludes owner identifiers.
+     *
+     * @param {{ runtimeWorkers?: Array<{ id: string, connected?: boolean, available?: boolean, activeJobId?: string | null }> }} [options]
+     */
+    async listPool({ runtimeWorkers = [] } = {}) {
+        const workerRows = await this.mysql.find('workers', {
+            view: [
+                'id',
+                'user_id',
+                'status',
+                'connected_at',
+                'disconnected_at',
+                'last_seen_at',
+                'created_at',
+                'updated_at'
+            ],
+            opt: { order: { created_at: 1 } }
+        });
+
+        const offerRows = await this.mysql.find('orders', {
+            filter: {
+                is_available: 1,
+                is_consumed: 0
+            },
+            view: [
+                'id',
+                'worker_id',
+                'model',
+                'price',
+                'tps',
+                'is_available',
+                'is_consumed',
+                'created_at',
+                'updated_at'
+            ],
+            opt: { order: { updated_at: -1 } }
+        });
+
+        const latestOfferByWorkerId = new Map();
+        for (const row of offerRows) {
+            if (!latestOfferByWorkerId.has(row.worker_id)) {
+                latestOfferByWorkerId.set(row.worker_id, row);
+            }
+        }
+
+        const runtimeByWorkerId = new Map();
+        for (const runtimeWorker of runtimeWorkers) {
+            if (runtimeWorker && typeof runtimeWorker.id === 'string' && runtimeWorker.id.trim().length > 0) {
+                runtimeByWorkerId.set(runtimeWorker.id.trim(), runtimeWorker);
+            }
+        }
+
+        return workerRows
+            .map((row) => mapPoolWorkerRow({
+                workerRow: row,
+                offerRow: latestOfferByWorkerId.get(row.id) || null,
+                runtimeWorker: runtimeByWorkerId.get(row.id) || null
+            }))
+            .map((worker) => ({
+                id: worker.id,
+                status: worker.status,
+                connected: worker.connected,
+                available: worker.available,
+                activeJobId: worker.activeJobId,
+                model: worker.model,
+                price: worker.price,
+                tps: worker.tps,
+                offerId: worker.offerId,
+                connectedAt: worker.connectedAt,
+                disconnectedAt: worker.disconnectedAt,
+                lastSeenAt: worker.lastSeenAt,
+                createdAt: worker.createdAt,
+                updatedAt: worker.updatedAt
+            }));
+    }
+
+    /**
      * @param {string} workerId
      */
     async getByIdOrNull(workerId) {

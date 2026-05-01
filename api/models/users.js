@@ -244,6 +244,7 @@ export const usersModel = new UsersModel();
  */
 function mapUserRow(row) {
     return {
+        id: row.id,
         name: row.name,
         email: row.email,
         maxPrice: row.max_price === null ? null : Number(row.max_price),
