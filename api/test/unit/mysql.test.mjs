@@ -75,10 +75,68 @@ describe('Mysql write payload handling', () => {
         assert.deepEqual(calls[0].data, [ null, 'user-1' ]);
     });
 
+    it('update() keeps null bindings when raw SQL is mixed in the payload', async () => {
+        const calls = [];
+        const connection = {
+            async execute(sql, data) {
+                calls.push({ sql, data });
+                return [ { affectedRows: 1 } ];
+            }
+        };
+
+        await Mysql.update('users', {
+            nickname: null,
+            updated_at: Mysql.raw('NOW()')
+        }, 'user-1', { connection });
+
+        assert.equal(calls.length, 1);
+        assert.equal(calls[0].sql, 'UPDATE `users` SET `nickname` = ?, `updated_at` = NOW() WHERE `id` = ?');
+        assert.deepEqual(calls[0].data, [ null, 'user-1' ]);
+    });
+
     it('update() throws CustomError when data is null', async () => {
         await assert.rejects(
             Mysql.update('users', null, 'user-1', { connection: { execute: async () => [ [] ] } }),
             (error) => error instanceof CustomError && error.message === 'Invalid data for update operation.',
         );
+    });
+
+    it('find() maps null filters to IS NULL', async () => {
+        const calls = [];
+        const connection = {
+            async execute(sql, data) {
+                calls.push({ sql, data });
+                return [ [] ];
+            }
+        };
+
+        await Mysql.find('users', {
+            filter: { deleted_at: null }
+        }, { connection });
+
+        assert.equal(calls.length, 1);
+        assert.equal(calls[0].sql, 'SELECT * FROM `users` WHERE `deleted_at` IS NULL');
+        assert.deepEqual(calls[0].data, []);
+    });
+
+    it('find() supports null and non-null filters together', async () => {
+        const calls = [];
+        const connection = {
+            async execute(sql, data) {
+                calls.push({ sql, data });
+                return [ [] ];
+            }
+        };
+
+        await Mysql.find('users', {
+            filter: {
+                deleted_at: null,
+                email: 'john@example.com'
+            }
+        }, { connection });
+
+        assert.equal(calls.length, 1);
+        assert.equal(calls[0].sql, 'SELECT * FROM `users` WHERE `deleted_at` IS NULL AND `email` = ?');
+        assert.deepEqual(calls[0].data, [ 'john@example.com' ]);
     });
 });

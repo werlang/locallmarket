@@ -20,6 +20,9 @@ export class LLM {
                         { role: "user", content: input }
                     ],
                     stream: true,
+                    stream_options: {
+                        include_usage: true
+                    },
                 }),
                 signal: controller.signal
             });

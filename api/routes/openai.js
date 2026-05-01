@@ -34,6 +34,11 @@ export function openAiRouterFactory({ streamRouter }) {
                 throw new HttpError(409, `No available worker found for model ${payload.model} within your price and TPS requirements.`);
             }
 
+            // Check if the consumer has sufficient balance to cover the worker's price;
+            if (requester.credits < worker.price) {
+                throw new HttpError(402, 'Insufficient balance to process the request.');
+            }
+
             // Atomically claim the worker; another concurrent request may have grabbed it first
             const claimed = await workersModel.markBusy(worker.id);
             if (!claimed) {
