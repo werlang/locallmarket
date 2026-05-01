@@ -383,6 +383,83 @@ test('listPoolByOwner rejects invalid owner ids', async () => {
     );
 });
 
+test('listPool returns public data for workers across owners', async () => {
+    const model = new WorkersModel({
+        mysql: createMysqlStub({
+            async find(table) {
+                if (table === 'workers') {
+                    return [
+                        {
+                            id: 'worker-1',
+                            user_id: 'owner-1',
+                            status: 'connected',
+                            connected_at: '2026-04-30T10:00:00.000Z',
+                            disconnected_at: null,
+                            last_seen_at: '2026-04-30T12:00:00.000Z',
+                            created_at: '2026-04-30T10:00:00.000Z',
+                            updated_at: '2026-04-30T12:00:00.000Z'
+                        },
+                        {
+                            id: 'worker-2',
+                            user_id: 'owner-2',
+                            status: 'disconnected',
+                            connected_at: '2026-04-30T10:00:00.000Z',
+                            disconnected_at: '2026-04-30T11:00:00.000Z',
+                            last_seen_at: '2026-04-30T11:00:00.000Z',
+                            created_at: '2026-04-30T10:00:00.000Z',
+                            updated_at: '2026-04-30T11:00:00.000Z'
+                        }
+                    ];
+                }
+
+                if (table === 'orders') {
+                    return [
+                        {
+                            id: 55,
+                            worker_id: 'worker-1',
+                            model: 'gpt-oss',
+                            price: '2.000000',
+                            tps: 33,
+                            is_available: 1,
+                            is_consumed: 0,
+                            created_at: '2026-04-30T10:00:00.000Z',
+                            updated_at: '2026-04-30T12:00:00.000Z'
+                        }
+                    ];
+                }
+
+                return [];
+            }
+        })
+    });
+
+    const pool = await model.listPool({
+        runtimeWorkers: [
+            { id: 'worker-1', connected: true, available: true, activeJobId: null }
+        ]
+    });
+
+    assert.equal(pool.length, 2);
+    assert.deepEqual(pool[0], {
+        id: 'worker-1',
+        status: 'connected',
+        connected: true,
+        available: true,
+        activeJobId: null,
+        model: 'gpt-oss',
+        price: 2,
+        tps: 33,
+        offerId: 55,
+        connectedAt: '2026-04-30T10:00:00.000Z',
+        disconnectedAt: null,
+        lastSeenAt: '2026-04-30T12:00:00.000Z',
+        createdAt: '2026-04-30T10:00:00.000Z',
+        updatedAt: '2026-04-30T12:00:00.000Z'
+    });
+    assert.equal(pool[1].id, 'worker-2');
+    assert.equal(Object.hasOwn(pool[1], 'userId'), false);
+});
+
 test('updatePerformanceTps persists observed TPS for the worker model offer', async () => {
     const updateCalls = [];
     const model = new WorkersModel({

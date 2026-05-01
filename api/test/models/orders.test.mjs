@@ -88,6 +88,193 @@ test('create uses owner id and persists lifecycle defaults', async () => {
     assert.equal(created.status, 'created');
 });
 
+test('createOwnOffer validates worker ownership and persists an enabled offer', async () => {
+    const model = makeModel();
+
+    Mysql.find = async () => [{ id: 'owner-1' }];
+    Mysql.findOne = async (table, { filter }) => {
+        if (table === 'workers') {
+            return { id: 'worker-1', user_id: 'owner-1' };
+        }
+
+        if (table === 'orders' && filter?.id === 19) {
+            return orderRow({
+                id: 19,
+                user_id: 'owner-1',
+                worker_id: 'worker-1',
+                model: 'gpt-oss',
+                price: 2.5,
+                tps: 50,
+                is_available: 1,
+                is_consumed: 0
+            });
+        }
+
+        return null;
+    };
+
+    let inserted = null;
+    Mysql.insert = async (_table, data) => {
+        inserted = data;
+        return [{ insertId: 19 }];
+    };
+
+    const created = await model.createOwnOffer('owner-1', {
+        workerId: 'worker-1',
+        model: 'gpt-oss',
+        price: 2.5,
+        tps: 50
+    });
+
+    assert.equal(inserted.user_id, 'owner-1');
+    assert.equal(inserted.worker_id, 'worker-1');
+    assert.equal(inserted.is_available, 1);
+    assert.equal(inserted.is_consumed, 0);
+    assert.equal(created.id, 19);
+    assert.equal(created.isAvailable, true);
+});
+
+test('listOwn returns owner orders sorted by update date', async () => {
+    const model = makeModel();
+
+    Mysql.find = async (table, options) => {
+        if (table === 'users') {
+            return [{ id: 'owner-1' }];
+        }
+
+        assert.equal(table, 'orders');
+        assert.deepEqual(options.filter, { user_id: 'owner-1' });
+        return [
+            orderRow({ id: 101, user_id: 'owner-1', updated_at: '2026-05-01T10:00:00.000Z' }),
+            orderRow({ id: 100, user_id: 'owner-1', updated_at: '2026-05-01T09:00:00.000Z' })
+        ];
+    };
+
+    const orders = await model.listOwn('owner-1');
+    assert.equal(orders.length, 2);
+    assert.equal(orders[0].id, 101);
+    assert.equal(orders[1].id, 100);
+});
+
+test('listPublic returns only available marketplace offers', async () => {
+    const model = makeModel();
+
+    Mysql.find = async (table, options) => {
+        assert.equal(table, 'orders');
+        assert.deepEqual(options.filter, { is_available: 1, is_consumed: 0 });
+        return [
+            orderRow({ id: 201, user_id: 'provider-1', worker_id: 'worker-a', model: 'gpt-oss', price: 1.1, tps: 55, is_available: 1, is_consumed: 0 }),
+            orderRow({ id: 202, user_id: 'provider-2', worker_id: 'worker-b', model: 'gpt-4.1-mini', price: 1.4, tps: 44, is_available: 1, is_consumed: 0 })
+        ];
+    };
+
+    const offers = await model.listPublic();
+    assert.equal(offers.length, 2);
+    assert.equal(offers[0].id, 201);
+    assert.equal(offers[1].id, 202);
+    assert.equal(offers[0].isAvailable, true);
+    assert.equal(offers[0].isConsumed, false);
+});
+
+test('updateOwn updates mutable offer fields for owner orders', async () => {
+    const model = makeModel();
+
+    Mysql.findOne = async (table, { filter }) => {
+        if (table === 'orders') {
+            return orderRow({ id: 77, user_id: 'owner-1', worker_id: 'worker-1', is_consumed: 0, is_available: 1 });
+        }
+
+        if (table === 'workers') {
+            return { id: filter.id, user_id: 'owner-1' };
+        }
+
+        return null;
+    };
+
+    let updateCall = null;
+    Mysql.update = async (table, data, where) => {
+        updateCall = { table, data, where };
+        return { affectedRows: 1 };
+    };
+
+    const updatedRow = orderRow({
+        id: 77,
+        user_id: 'owner-1',
+        worker_id: 'worker-2',
+        model: 'gpt-4.1-mini',
+        price: 3,
+        tps: 60,
+        is_consumed: 0,
+        is_available: 1
+    });
+    Mysql.findOne = async (table, options) => {
+        if (table === 'orders' && options.filter?.id === 77) {
+            if (updateCall) {
+                return updatedRow;
+            }
+
+            return orderRow({ id: 77, user_id: 'owner-1', worker_id: 'worker-1', is_consumed: 0, is_available: 1 });
+        }
+
+        if (table === 'workers') {
+            return { id: options.filter.id, user_id: 'owner-1' };
+        }
+
+        return null;
+    };
+
+    const result = await model.updateOwn('owner-1', 77, {
+        workerId: 'worker-2',
+        model: 'gpt-4.1-mini',
+        price: 3,
+        tps: 60
+    });
+
+    assert.equal(updateCall.table, 'orders');
+    assert.deepEqual(updateCall.data, {
+        worker_id: 'worker-2',
+        model: 'gpt-4.1-mini',
+        price: 3,
+        tps: 60
+    });
+    assert.deepEqual(updateCall.where, { id: 77, user_id: 'owner-1' });
+    assert.equal(result.workerId, 'worker-2');
+    assert.equal(result.price, 3);
+});
+
+test('setOwnAvailability toggles offer availability', async () => {
+    const model = makeModel();
+
+    let updateCount = 0;
+    Mysql.findOne = async (table, { filter }) => {
+        if (table === 'orders' && filter?.id === 42) {
+            if (updateCount > 0) {
+                return orderRow({ id: 42, user_id: 'owner-1', worker_id: 'worker-1', is_available: 0, is_consumed: 0 });
+            }
+
+            return orderRow({ id: 42, user_id: 'owner-1', worker_id: 'worker-1', is_available: 1, is_consumed: 0 });
+        }
+
+        return null;
+    };
+
+    let updateArgs = null;
+    Mysql.update = async (table, data, where) => {
+        updateCount += 1;
+        updateArgs = { table, data, where };
+        return { affectedRows: 1 };
+    };
+
+    const updated = await model.setOwnAvailability('owner-1', 42, false);
+
+    assert.deepEqual(updateArgs, {
+        table: 'orders',
+        data: { is_available: 0 },
+        where: { id: 42, user_id: 'owner-1', is_consumed: 0 }
+    });
+    assert.equal(updated.isAvailable, false);
+});
+
 test('deleteOwn deletes only when owner matches', async () => {
     const model = makeModel();
     Mysql.findOne = async () => orderRow({ id: 99, user_id: 'owner-9' });

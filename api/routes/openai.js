@@ -14,7 +14,7 @@ export function openAiRouterFactory({ streamRouter }) {
 
     router.post('/chat/completions', async (req, res, next) => {
         let requesterId = null;
-        let createdOrderId = null;
+        let consumedOrderId = null;
 
         try {
             const apiKey = parseBearerApiKey(req.headers);
@@ -30,15 +30,8 @@ export function openAiRouterFactory({ streamRouter }) {
                 throw new HttpError(409, `No available worker found for model ${payload.model} within your price and TPS requirements.`);
             }
 
-            const createdOrder = await ordersModel.create(requester.id, {
-                workerId: workerOffer.workerId,
-                model: payload.model,
-                price: workerOffer.price,
-                tps: workerOffer.tps
-            });
-            createdOrderId = createdOrder.id;
-
-            const consumed = await ordersModel.consumeForUse(requester.id, createdOrder.id);
+            const consumed = await ordersModel.consumeForUse(requester.id, workerOffer.id);
+            consumedOrderId = consumed.order.id;
             const stream = new OpenAiChatCompletionsStream({
                 res,
                 model: payload.model
@@ -73,11 +66,11 @@ export function openAiRouterFactory({ streamRouter }) {
                 streamRouter.cancel(jobId);
             });
         } catch (error) {
-            if (createdOrderId !== null && requesterId !== null && !res.headersSent) {
+            if (consumedOrderId !== null && requesterId !== null) {
                 try {
-                    await ordersModel.deleteOwn(requesterId, createdOrderId);
+                    await ordersModel.unconsumForUse(requesterId, consumedOrderId);
                 } catch {
-                    // Keep error contract deterministic; deletion is best-effort cleanup.
+                    // Keep error contract deterministic; refund is best-effort cleanup.
                 }
             }
 

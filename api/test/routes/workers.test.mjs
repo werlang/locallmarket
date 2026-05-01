@@ -4,10 +4,10 @@ import assert from 'node:assert/strict';
 import { workersRouterFactory } from '../../routes/workers.js';
 import { usersModel } from '../../models/users.js';
 
-function getGetHandler(router, path) {
-    const layer = router.stack.find((candidate) => candidate.route?.path === path);
+function getRouteHandler(router, method, path) {
+    const layer = router.stack.find((candidate) => candidate.route?.path === path && candidate.route?.methods?.[method]);
     assert.ok(layer, `Expected route ${path} to exist`);
-    assert.ok(layer.route.methods.get, `Expected route ${path} to support GET`);
+    assert.ok(layer.route.methods[method], `Expected route ${path} to support ${method.toUpperCase()}`);
     return layer.route.stack[0].handle;
 }
 
@@ -26,7 +26,7 @@ function makeMockRes() {
     };
 }
 
-test('workersRouterFactory GET /pool returns owner-scoped worker pool details', async () => {
+test('workersRouterFactory GET /pool returns public worker pool details for all owners', async () => {
     const originalGetByApiKey = usersModel.getByApiKey;
     const workersModelCalls = [];
     const snapshotCalls = [];
@@ -38,12 +38,11 @@ test('workersRouterFactory GET /pool returns owner-scoped worker pool details', 
 
     const router = workersRouterFactory({
         workersModel: {
-            async listPoolByOwner(ownerId, options) {
-                workersModelCalls.push({ ownerId, options });
+            async listPool(options) {
+                workersModelCalls.push(options);
                 return [
                     {
                         id: 'worker-1',
-                        userId: ownerId,
                         status: 'connected',
                         connected: true,
                         available: true,
@@ -69,7 +68,7 @@ test('workersRouterFactory GET /pool returns owner-scoped worker pool details', 
         }
     });
 
-    const handler = getGetHandler(router, '/pool');
+    const handler = getRouteHandler(router, 'get', '/pool');
     const req = {
         headers: {
             authorization: 'Bearer owner-api-key'
@@ -85,10 +84,9 @@ test('workersRouterFactory GET /pool returns owner-scoped worker pool details', 
     usersModel.getByApiKey = originalGetByApiKey;
 
     assert.equal(errors.length, 0);
-    assert.deepEqual(snapshotCalls, [{ ownerId: 'owner-1' }]);
+    assert.deepEqual(snapshotCalls, [undefined]);
     assert.equal(workersModelCalls.length, 1);
-    assert.equal(workersModelCalls[0].ownerId, 'owner-1');
-    assert.deepEqual(workersModelCalls[0].options.runtimeWorkers, [
+    assert.deepEqual(workersModelCalls[0].runtimeWorkers, [
         { id: 'worker-1', connected: true, available: true, activeJobId: null }
     ]);
     assert.equal(res.statusCode, 200);
@@ -97,7 +95,6 @@ test('workersRouterFactory GET /pool returns owner-scoped worker pool details', 
         workers: [
             {
                 id: 'worker-1',
-                userId: 'owner-1',
                 status: 'connected',
                 connected: true,
                 available: true,
@@ -119,8 +116,8 @@ test('workersRouterFactory GET /pool returns owner-scoped worker pool details', 
 test('workersRouterFactory GET /pool forwards auth failures to next', async () => {
     const router = workersRouterFactory({
         workersModel: {
-            async listPoolByOwner() {
-                throw new Error('listPoolByOwner should not be called');
+            async listPool() {
+                throw new Error('listPool should not be called');
             }
         },
         streamRouter: {
@@ -130,7 +127,7 @@ test('workersRouterFactory GET /pool forwards auth failures to next', async () =
         }
     });
 
-    const handler = getGetHandler(router, '/pool');
+    const handler = getRouteHandler(router, 'get', '/pool');
     const req = { headers: {} };
     const res = makeMockRes();
     const errors = [];

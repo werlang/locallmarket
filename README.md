@@ -37,7 +37,7 @@ Core design constraints:
 ### OpenAI-Compatible Dispatch
 
 1. A client calls `POST /v1/chat/completions` with bearer API key auth and `stream: true`.
-2. The API resolves the requester identity, finds the first available offer for the requested model, creates/consumes an internal order, and dispatches to the selected worker.
+2. The API resolves the requester identity, finds the first available offer for the requested model, consumes that existing offer, and dispatches to the selected worker.
 3. The response is streamed as OpenAI chunk-style SSE and ends with `[DONE]`.
 
 ## API Contract
@@ -60,7 +60,7 @@ Returns current API queue depth and worker capacity.
 
 ### `GET /workers/pool`
 
-Returns an owner-scoped snapshot of the current worker pool, combining persisted worker bindings/offers with live runtime status.
+Returns a public snapshot of the current worker pool, combining persisted worker bindings/offers with live runtime status.
 
 - Header: `Authorization: Bearer <api_key>`
 - Response `200`: `{ "ok": true, "workers": [...] }`
@@ -68,12 +68,20 @@ Returns an owner-scoped snapshot of the current worker pool, combining persisted
 
 Worker objects include:
 
-- `id`, `userId`
+- `id`
 - `status`, `connected`, `available`, `activeJobId`
 - `model`, `price`, `tps`, `offerId`
 - `connectedAt`, `disconnectedAt`, `lastSeenAt`, `createdAt`, `updatedAt`
 
-This endpoint is visibility-safe by design: it resolves owner identity from API key and only returns workers/offers owned by that user.
+This endpoint is visibility-safe by design: it resolves requester auth but only returns public pool information (no owner identifiers).
+
+### `GET /workers/pool/me`
+
+Returns an owner-scoped worker snapshot for the authenticated provider.
+
+- Header: `Authorization: Bearer <api_key>`
+- Response `200`: `{ "ok": true, "workers": [...] }`
+- Returns `401` when bearer auth is missing/invalid.
 
 ---
 
@@ -170,6 +178,61 @@ Enqueues a stream task and returns an SSE stream relayed from a connected worker
 
 ---
 
+### Orders
+
+Orders routes are mounted at `/orders`.
+
+#### `GET /orders`
+
+Lists orders owned by the authenticated user.
+
+- Header: `Authorization: Bearer <api_key>`
+- Response `200`: `{ "ok": true, "orders": [...] }`
+
+#### `GET /orders/public`
+
+Lists currently available public marketplace offers.
+
+- Response `200`: `{ "ok": true, "orders": [...] }`
+
+#### `POST /orders`
+
+Creates a worker-bound provider offer.
+
+- Header: `Authorization: Bearer <api_key>`
+- Request body: `{ "workerId": string, "model": string, "price": number, "tps": number, "enabled"?: boolean }`
+- Response `201`: `{ "ok": true, "order": {...} }`
+
+#### `PUT /orders/:orderId`
+
+Updates mutable fields of an owner order (`workerId`, `model`, `price`, `tps`).
+
+- Header: `Authorization: Bearer <api_key>`
+- Response `200`: `{ "ok": true, "order": {...} }`
+
+#### `DELETE /orders/:orderId`
+
+Deletes an owner order.
+
+- Header: `Authorization: Bearer <api_key>`
+- Response `200`: `{ "ok": true }`
+
+#### `POST /orders/:orderId/enable`
+
+Enables an owner order for marketplace matching.
+
+- Header: `Authorization: Bearer <api_key>`
+- Response `200`: `{ "ok": true, "order": {...} }`
+
+#### `POST /orders/:orderId/disable`
+
+Disables an owner order from marketplace matching.
+
+- Header: `Authorization: Bearer <api_key>`
+- Response `200`: `{ "ok": true, "order": {...} }`
+
+---
+
 ### OpenAI-Compatible Streaming
 
 #### `POST /v1/chat/completions`
@@ -181,7 +244,7 @@ OpenAI-compatible streaming route.
 - Behavior:
   - Resolves requester identity from bearer API key.
   - Selects the first available offer for the requested model.
-  - Creates and consumes an internal order, then dispatches to the selected worker.
+  - Consumes the selected existing offer, then dispatches to the selected worker.
   - Streams OpenAI chunk-style SSE output and ends with `[DONE]`.
   - Uses shared SSE header behavior from `api/helpers/stream.js` (single header policy).
 - Returns `409` when no worker is available for the requested model.
@@ -272,10 +335,11 @@ api/
     users.js             # UsersModel: user business logic over UsersDriver
     workers.js           # WorkersModel: worker ownership, visibility, and TPS updates
   routes/
+    orders.js            # /orders CRUD + public/owner order listing
     openai.js            # /v1/chat/completions OpenAI-compatible streaming
     tasks.js             # /tasks/run direct stream task endpoint
     users.js             # /users/users* account routes
-    workers.js           # /workers/pool owner-scoped worker pool route
+    workers.js           # /workers/pool public and /workers/pool/me owner worker visibility
   test/
     helpers/             # Helper-level tests (auth/orders/router/users)
     integration/         # Integration tests for worker binding and stream flows

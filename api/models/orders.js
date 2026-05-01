@@ -1,6 +1,9 @@
 import { HttpError } from '../helpers/error.js';
 import { Mysql } from '../helpers/mysql.js';
 
+const DEFAULT_MIN_TPS = 5;
+const DEFAULT_MAX_PRICE = 100;
+
 /**
  * Order lifecycle business rules: owner scoping, worker-connectivity checks,
  * and atomic dispatch consumption for worker-bound execution jobs.
@@ -45,6 +48,153 @@ export class OrdersModel {
         });
 
         return this.getOrderById(result.insertId);
+    }
+
+    /**
+     * Creates an owner-scoped worker offer that can be discovered by marketplace matching.
+     *
+     * @param {string} ownerId
+     * @param {{ workerId: string, model: string, price: number, tps: number, enabled?: boolean }} input
+     */
+    async createOwnOffer(ownerId, input) {
+        const owner = await this.getOwner(ownerId);
+        const payload = parseOfferInput(input);
+
+        await this.assertOwnerOwnsWorker(owner.id, payload.workerId);
+
+        const [result] = await Mysql.insert('orders', {
+            user_id: owner.id,
+            worker_id: payload.workerId,
+            model: payload.model,
+            price: payload.price,
+            tps: payload.tps,
+            is_available: payload.enabled ? 1 : 0,
+            is_consumed: 0
+        });
+
+        return this.getOrderById(result.insertId);
+    }
+
+    /**
+     * Lists orders that belong to the authenticated owner.
+     * @param {string} ownerId
+     * @returns {Promise<Array<{ id: number, userId: string, workerId: string, model: string, price: number, tps: number, isAvailable: boolean, isConsumed: boolean, status: string, consumedAt: Date | string | null, createdAt: Date | string, updatedAt: Date | string }>>}
+     */
+    async listOwn(ownerId) {
+        const owner = await this.getOwner(ownerId);
+
+        const rows = await Mysql.find('orders', {
+            filter: { user_id: owner.id },
+            view: [
+                'id',
+                'user_id',
+                'worker_id',
+                'model',
+                'price',
+                'tps',
+                'is_available',
+                'is_consumed',
+                'consumed_at',
+                'created_at',
+                'updated_at'
+            ],
+            opt: {
+                order: { updated_at: -1 }
+            }
+        });
+
+        return rows.map(mapOrderRow);
+    }
+
+    /**
+     * Lists currently available public offers across all providers.
+     * Public offers are represented by order rows marked available and not consumed.
+     * @returns {Promise<Array<{ id: number, userId: string, workerId: string, model: string, price: number, tps: number, isAvailable: boolean, isConsumed: boolean, status: string, consumedAt: Date | string | null, createdAt: Date | string, updatedAt: Date | string }>>}
+     * 
+     */
+    async listPublic() {
+        const rows = await Mysql.find('orders', {
+            filter: {
+                is_available: 1,
+                is_consumed: 0
+            },
+            view: [
+                'id',
+                'user_id',
+                'worker_id',
+                'model',
+                'price',
+                'tps',
+                'is_available',
+                'is_consumed',
+                'consumed_at',
+                'created_at',
+                'updated_at'
+            ],
+            opt: {
+                order: { price: 1, tps: -1, updated_at: -1 }
+            }
+        });
+
+        return rows.map(mapOrderRow);
+    }
+
+    /**
+     * Updates mutable fields of an owner-scoped offer order.
+     *
+     * @param {string} ownerId
+     * @param {number} orderId
+     * @param {{ workerId?: string, model?: string, price?: number, tps?: number }} input
+     */
+    async updateOwn(ownerId, orderId, input) {
+        const { owner, order } = await this.getOwnedOrder(ownerId, orderId);
+
+        if (order.isConsumed) {
+            throw new HttpError(409, 'Consumed orders cannot be updated.');
+        }
+
+        const payload = parseOfferPatchInput(input);
+        const nextWorkerId = payload.workerId ?? order.workerId;
+        await this.assertOwnerOwnsWorker(owner.id, nextWorkerId);
+
+        const updateData = {
+            ...(payload.workerId !== undefined ? { worker_id: payload.workerId } : {}),
+            ...(payload.model !== undefined ? { model: payload.model } : {}),
+            ...(payload.price !== undefined ? { price: payload.price } : {}),
+            ...(payload.tps !== undefined ? { tps: payload.tps } : {})
+        };
+
+        await Mysql.update('orders', updateData, {
+            id: order.id,
+            user_id: owner.id
+        });
+
+        return this.getOrderById(order.id);
+    }
+
+    /**
+     * Enables or disables an owner-scoped offer.
+     *
+     * @param {string} ownerId
+     * @param {number} orderId
+     * @param {boolean} enabled
+     */
+    async setOwnAvailability(ownerId, orderId, enabled) {
+        const { owner, order } = await this.getOwnedOrder(ownerId, orderId);
+
+        if (order.isConsumed) {
+            throw new HttpError(409, 'Consumed orders cannot be toggled.');
+        }
+
+        await Mysql.update('orders', {
+            is_available: enabled ? 1 : 0
+        }, {
+            id: order.id,
+            user_id: owner.id,
+            is_consumed: 0
+        });
+
+        return this.getOrderById(order.id);
     }
 
     /**
@@ -130,13 +280,10 @@ export class OrdersModel {
             is_consumed: 0
         };
 
-        if (maxPrice != null) {
-                filter.price = Mysql.lte(maxPrice);
-        }
-
-        if (minTps != null) {
-                filter.tps = Mysql.gte(minTps);
-        }
+        const effectiveMaxPrice = maxPrice == null ? DEFAULT_MAX_PRICE : maxPrice;
+        const effectiveMinTps = minTps == null ? DEFAULT_MIN_TPS : minTps;
+        filter.price = Mysql.lte(effectiveMaxPrice);
+        filter.tps = Mysql.gte(effectiveMinTps);
 
         const candidates = await Mysql.find('orders', {
             filter,
@@ -328,6 +475,27 @@ export class OrdersModel {
         });
 
         return order ? mapOrderRow(order) : null;
+    }
+
+    /**
+     * Ensures the worker exists and belongs to the owner creating/updating an offer.
+     * @param {string} ownerId
+     * @param {string} workerId
+     */
+    async assertOwnerOwnsWorker(ownerId, workerId) {
+        const worker = await Mysql.findOne('workers', {
+            filter: { id: workerId },
+            view: ['id', 'user_id'],
+            opt: { limit: 1 }
+        });
+
+        if (!worker) {
+            throw new HttpError(404, 'Worker not found.');
+        }
+
+        if (String(worker.user_id) !== String(ownerId)) {
+            throw new HttpError(403, 'You can only bind orders to your own workers.');
+        }
     }
 
     /**
@@ -750,4 +918,106 @@ function parsePlatformFeePercent(value) {
 
 function roundCredits(value) {
     return Number(Number(value).toFixed(6));
+}
+
+/**
+ * @param {unknown} input
+ * @returns {{ workerId: string, model: string, price: number, tps: number, enabled: boolean }}
+ */
+function parseOfferInput(input) {
+    const payload = input && typeof input === 'object' ? input : {};
+    return {
+        workerId: parseWorkerId(payload.workerId),
+        model: parseModel(payload.model),
+        price: parsePrice(payload.price),
+        tps: parseTps(payload.tps),
+        enabled: parseEnabled(payload.enabled, true)
+    };
+}
+
+/**
+ * @param {unknown} input
+ * @returns {{ workerId?: string, model?: string, price?: number, tps?: number }}
+ */
+function parseOfferPatchInput(input) {
+    const payload = input && typeof input === 'object' ? input : {};
+    const patch = {
+        ...(Object.hasOwn(payload, 'workerId') ? { workerId: parseWorkerId(payload.workerId) } : {}),
+        ...(Object.hasOwn(payload, 'model') ? { model: parseModel(payload.model) } : {}),
+        ...(Object.hasOwn(payload, 'price') ? { price: parsePrice(payload.price) } : {}),
+        ...(Object.hasOwn(payload, 'tps') ? { tps: parseTps(payload.tps) } : {})
+    };
+
+    if (Object.keys(patch).length < 1) {
+        throw new HttpError(400, 'At least one field must be provided: workerId, model, price, tps.');
+    }
+
+    return patch;
+}
+
+/**
+ * @param {unknown} workerId
+ * @returns {string}
+ */
+function parseWorkerId(workerId) {
+    if (typeof workerId !== 'string' || workerId.trim().length < 1 || workerId.trim().length > 128) {
+        throw new HttpError(400, 'workerId must be a non-empty string up to 128 characters.');
+    }
+
+    return workerId.trim();
+}
+
+/**
+ * @param {unknown} model
+ * @returns {string}
+ */
+function parseModel(model) {
+    if (typeof model !== 'string' || model.trim().length < 1 || model.trim().length > 128) {
+        throw new HttpError(400, 'model must be a non-empty string up to 128 characters.');
+    }
+
+    return model.trim();
+}
+
+/**
+ * @param {unknown} price
+ * @returns {number}
+ */
+function parsePrice(price) {
+    const normalized = Number(price);
+    if (!Number.isFinite(normalized) || normalized <= 0) {
+        throw new HttpError(400, 'price must be a positive number.');
+    }
+
+    return roundCredits(normalized);
+}
+
+/**
+ * @param {unknown} tps
+ * @returns {number}
+ */
+function parseTps(tps) {
+    const normalized = Number(tps);
+    if (!Number.isInteger(normalized) || normalized < 1) {
+        throw new HttpError(400, 'tps must be a positive integer.');
+    }
+
+    return normalized;
+}
+
+/**
+ * @param {unknown} value
+ * @param {boolean} fallback
+ * @returns {boolean}
+ */
+function parseEnabled(value, fallback) {
+    if (value === undefined) {
+        return fallback;
+    }
+
+    if (typeof value !== 'boolean') {
+        throw new HttpError(400, 'enabled must be a boolean when provided.');
+    }
+
+    return value;
 }

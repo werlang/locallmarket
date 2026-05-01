@@ -5,7 +5,7 @@ import { usersModel } from '../models/users.js';
 
 /**
  * Creates worker visibility routes.
- * @param {{ workersModel: { listPoolByOwner: Function }, streamRouter: { getWorkersSnapshot?: Function } }} deps
+ * @param {{ workersModel: { listPoolByOwner: Function, listPool: Function }, streamRouter: { getWorkersSnapshot?: Function } }} deps
  */
 export function workersRouterFactory({ workersModel, streamRouter }) {
     const router = express.Router();

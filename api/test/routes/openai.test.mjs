@@ -44,16 +44,14 @@ function getPostHandler(router, path) {
     return layer.route.stack[0].handle;
 }
 
-test('openAiRouterFactory /chat/completions auto-matches worker, creates internal order, and streams OpenAI chunks', async () => {
+test('openAiRouterFactory /chat/completions auto-matches and consumes existing offer, then streams OpenAI chunks', async () => {
     const originalGetByApiKey = usersModel.getByApiKey;
     const originalFindOffer = ordersModel.findFirstAvailableOfferByModel;
-    const originalCreate = ordersModel.create;
     const originalConsumeForUse = ordersModel.consumeForUse;
-    const originalDeleteOwn = ordersModel.deleteOwn;
+    const originalUnconsumeForUse = ordersModel.unconsumForUse;
 
     const calls = {
         models: [],
-        create: [],
         consume: [],
         enqueued: [],
         cancelled: []
@@ -76,20 +74,6 @@ test('openAiRouterFactory /chat/completions auto-matches worker, creates interna
         };
     };
 
-    ordersModel.create = async (ownerId, payload) => {
-        calls.create.push({ ownerId, payload });
-        return {
-            id: 71,
-            userId: ownerId,
-            workerId: payload.workerId,
-            model: payload.model,
-            price: payload.price,
-            tps: payload.tps,
-            isAvailable: false,
-            isConsumed: false
-        };
-    };
-
     ordersModel.consumeForUse = async (consumerId, orderId) => {
         calls.consume.push({ consumerId, orderId });
         return {
@@ -102,8 +86,8 @@ test('openAiRouterFactory /chat/completions auto-matches worker, creates interna
         };
     };
 
-    ordersModel.deleteOwn = async () => {
-        throw new Error('deleteOwn should not be called on success path');
+    ordersModel.unconsumForUse = async () => {
+        throw new Error('unconsumForUse should not be called on success path');
     };
 
     const router = openAiRouterFactory({
@@ -139,18 +123,17 @@ test('openAiRouterFactory /chat/completions auto-matches worker, creates interna
 
     usersModel.getByApiKey = originalGetByApiKey;
     ordersModel.findFirstAvailableOfferByModel = originalFindOffer;
-    ordersModel.create = originalCreate;
     ordersModel.consumeForUse = originalConsumeForUse;
-    ordersModel.deleteOwn = originalDeleteOwn;
+    ordersModel.unconsumForUse = originalUnconsumeForUse;
 
     assert.equal(errors.length, 0);
     assert.deepEqual(calls.models, ['gpt-4.1-mini']);
-    assert.equal(calls.create.length, 1);
     assert.equal(calls.consume.length, 1);
+    assert.deepEqual(calls.consume[0], { consumerId: 'requester-1', orderId: 9 });
     assert.equal(calls.enqueued.length, 1);
     assert.equal(calls.enqueued[0].targetWorkerId, 'worker-1');
     assert.deepEqual(calls.enqueued[0].settlement, {
-        orderId: 71,
+        orderId: 9,
         requesterId: 'requester-1'
     });
     assert.equal(calls.enqueued[0].payload.message, '[system] Be concise\n[user] Hello world');
@@ -214,12 +197,11 @@ test('openAiRouterFactory /chat/completions returns 409 when no worker is availa
     assert.equal(errors[0].status, 409);
 });
 
-test('openAiRouterFactory /chat/completions deletes internally created order if consume fails', async () => {
+test('openAiRouterFactory /chat/completions refunds consumed offer if enqueue fails', async () => {
     const originalGetByApiKey = usersModel.getByApiKey;
     const originalFindOffer = ordersModel.findFirstAvailableOfferByModel;
-    const originalCreate = ordersModel.create;
     const originalConsumeForUse = ordersModel.consumeForUse;
-    const originalDeleteOwn = ordersModel.deleteOwn;
+    const originalUnconsumeForUse = ordersModel.unconsumForUse;
 
     const cleanupCalls = [];
 
@@ -232,20 +214,26 @@ test('openAiRouterFactory /chat/completions deletes internally created order if 
         price: 4,
         tps: 25
     });
-    ordersModel.create = async () => ({ id: 88, workerId: 'worker-1', model: 'gpt-4.1-mini', price: 4, tps: 25 });
     ordersModel.consumeForUse = async () => {
-        const error = new Error('worker busy');
-        error.status = 409;
-        throw error;
+        return {
+            status: 'consumed',
+            order: {
+                id: 88,
+                workerId: 'worker-1',
+                model: 'gpt-4.1-mini'
+            }
+        };
     };
-    ordersModel.deleteOwn = async (ownerId, orderId) => {
+    ordersModel.unconsumForUse = async (ownerId, orderId) => {
         cleanupCalls.push({ ownerId, orderId });
     };
 
     const router = openAiRouterFactory({
         streamRouter: {
             enqueue() {
-                throw new Error('enqueue should not be called when consume fails');
+                const error = new Error('enqueue failed');
+                error.status = 503;
+                throw error;
             },
             cancel() {}
         }
@@ -269,11 +257,10 @@ test('openAiRouterFactory /chat/completions deletes internally created order if 
 
     usersModel.getByApiKey = originalGetByApiKey;
     ordersModel.findFirstAvailableOfferByModel = originalFindOffer;
-    ordersModel.create = originalCreate;
     ordersModel.consumeForUse = originalConsumeForUse;
-    ordersModel.deleteOwn = originalDeleteOwn;
+    ordersModel.unconsumForUse = originalUnconsumeForUse;
 
     assert.equal(errors.length, 1);
-    assert.equal(errors[0].status, 409);
+    assert.equal(errors[0].status, 503);
     assert.deepEqual(cleanupCalls, [{ ownerId: 'requester-1', orderId: 88 }]);
 });

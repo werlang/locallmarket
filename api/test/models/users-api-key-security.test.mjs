@@ -75,9 +75,11 @@ test('getByApiKeyOrNull queries by lookup hash instead of plaintext api key', as
         };
     };
 
-    await model.getByApiKeyOrNull('live-api-key');
+    const user = await model.getByApiKeyOrNull('live-api-key');
 
     assert.deepEqual(receivedFilter, {
         api_key_lookup_hash: computeApiKeyLookupHash('live-api-key')
     });
+    assert.equal(user.id, 'uuid-auth');
+    assert.equal(user.name, 'Auth User');
 });
