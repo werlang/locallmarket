@@ -24,17 +24,6 @@ router.post('/', async (req, res, next) => {
 
 router.get('/', async (req, res, next) => {
     try {
-        const query = parseListUsersQuery(req.query);
-        const users = await usersModel.list(query);
-
-        return sendSuccess(res, { body: { users } });
-    } catch (error) {
-        return next(error);
-    }
-});
-
-router.get('/:apiKey', async (req, res, next) => {
-    try {
         const apiKey = parseBearerApiKey(req.headers);
         const user = await usersModel.getByApiKey(apiKey);
 
@@ -44,7 +33,7 @@ router.get('/:apiKey', async (req, res, next) => {
     }
 });
 
-router.put('/:apiKey', async (req, res, next) => {
+router.put('/', async (req, res, next) => {
     try {
         const apiKey = parseBearerApiKey(req.headers);
         const user = await usersModel.getByApiKey(apiKey);
@@ -57,7 +46,7 @@ router.put('/:apiKey', async (req, res, next) => {
     }
 });
 
-router.post('/:apiKey/recharge', async (req, res, next) => {
+router.post('/recharge', async (req, res, next) => {
     try {
         const apiKey = parseBearerApiKey(req.headers);
         const user = await usersModel.getByApiKey(apiKey);
@@ -70,7 +59,7 @@ router.post('/:apiKey/recharge', async (req, res, next) => {
     }
 });
 
-router.post('/:apiKey/reset', async (req, res, next) => {
+router.post('/reset', async (req, res, next) => {
     try {
         const apiKey = parseBearerApiKey(req.headers);
         const currentUser = await usersModel.getByApiKey(apiKey);
@@ -82,7 +71,7 @@ router.post('/:apiKey/reset', async (req, res, next) => {
     }
 });
 
-router.delete('/:apiKey', async (req, res, next) => {
+router.delete('/', async (req, res, next) => {
     try {
         const apiKey = parseBearerApiKey(req.headers);
         const user = await usersModel.getByApiKey(apiKey);

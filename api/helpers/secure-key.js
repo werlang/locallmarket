@@ -6,9 +6,9 @@ import {
     scryptSync
 } from 'crypto';
 
-const API_KEY_SECRET_ENV = 'API_KEY_ENCRYPTION_SECRET';
-const ENCRYPTION_SALT = 'locallmarket/api-key-encryption';
-const LOOKUP_SALT = 'locallmarket/api-key-lookup';
+const API_KEY_ENCRYPTION_SECRET = process.env.API_KEY_ENCRYPTION_SECRET;
+const ENCRYPTION_SALT = process.env.ENCRYPTION_SALT;
+const LOOKUP_SALT = process.env.LOOKUP_SALT;
 const ENCRYPTION_ALGORITHM = 'aes-256-gcm';
 const ENCRYPTION_VERSION = 'v1';
 const IV_LENGTH = 12;
@@ -98,9 +98,9 @@ export function decryptApiKey(encryptedApiKey) {
  * @returns {{ encryptionKey: Buffer, lookupKey: Buffer }}
  */
 function getDerivedKeys() {
-    const secret = process.env[API_KEY_SECRET_ENV];
+    const secret = API_KEY_ENCRYPTION_SECRET;
     if (!secret) {
-        throw new Error(`${API_KEY_SECRET_ENV} must be set to protect stored API keys.`);
+        throw new Error(`API_KEY_ENCRYPTION_SECRET must be set to protect stored API keys.`);
     }
 
     if (cachedKeys && cachedSecret === secret) {
