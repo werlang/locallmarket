@@ -36,11 +36,12 @@ class SocketStream {
 export class ApiStreamClient {
 
     /**
-     * @param {{ url?: string, workerId?: string, apiKey?: string, model?: string, tps?: number, price?: number }} options
+     * @param {{ url?: string, workerId?: string, workerToken?: string, apiKey?: string, model?: string, tps?: number, price?: number }} options
      */
     constructor({
         url = 'ws://127.0.0.1:3000/ws/workers',
         workerId = `worker-${randomUUID()}`,
+        workerToken = process.env.WORKER_TOKEN,
         apiKey = process.env.WORKER_USER_API_KEY,
         model = process.env.WORKER_MODEL,
         tps = process.env.WORKER_TPS ? Number(process.env.WORKER_TPS) : undefined,
@@ -48,6 +49,7 @@ export class ApiStreamClient {
     } = {}) {
         this.url = url;
         this.workerId = workerId;
+        this.workerToken = typeof workerToken === 'string' ? workerToken.trim() : '';
         this.apiKey = typeof apiKey === 'string' ? apiKey.trim() : '';
         this.model = typeof model === 'string' ? model.trim() : '';
         this.tps = Number.isFinite(tps) ? tps : null;
@@ -112,6 +114,7 @@ export class ApiStreamClient {
         this.reconnectDelayMs = DEFAULT_RECONNECT_DELAY_MS;
         this.sendToSocket(socket, 'worker-register', {
             workerId: this.workerId,
+            token: this.workerToken || undefined,
             apiKey: this.apiKey,
             model: this.model,
             tps: this.tps,

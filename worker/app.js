@@ -10,6 +10,7 @@ const host = '0.0.0.0';
 
 const apiClient = new ApiStreamClient({
     url: process.env.API_WS_URL,
+    workerToken: process.env.WORKER_TOKEN,
     apiKey: process.env.WORKER_USER_API_KEY,
     model: process.env.WORKER_MODEL,
     tps: process.env.WORKER_TPS ? Number(process.env.WORKER_TPS) : undefined,
