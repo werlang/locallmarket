@@ -5,6 +5,7 @@ export class Mysql {
         
     static connected = false;
     static connection = null;
+    static #rawSqlSentinel = Symbol('raw-sql-fragment');
     static config = {
         host: 'mysql',
         user: 'root',
@@ -51,6 +52,25 @@ export class Mysql {
     }
 
     /**
+     * Validates and sanitizes write payloads by dropping undefined fields.
+     */
+    static #sanitizeWriteData(data, operation) {
+        if (!data || typeof data !== 'object' || Array.isArray(data)) {
+            throw new CustomError(`Invalid data for ${operation} operation.`);
+        }
+
+        const sanitized = Object.fromEntries(
+            Object.entries(data).filter(([, value]) => value !== undefined),
+        );
+
+        if (Object.keys(sanitized).length < 1) {
+            throw new CustomError(`No data to ${operation}.`);
+        }
+
+        return sanitized;
+    }
+
+    /**
      * Executes a formatted SQL statement through mysql2.
      */
     static async #query(sql, data, { connection } = {}) {
@@ -88,8 +108,9 @@ export class Mysql {
         if (!Array.isArray(data)) data = [ data ];
 
         return Promise.all(data.map(row => {
-            const values = Object.values(row);
-            const fields = Object.keys(row).map(k => `\`${k}\``);
+            const sanitizedRow = Mysql.#sanitizeWriteData(row, 'insert');
+            const values = Object.values(sanitizedRow);
+            const fields = Object.keys(sanitizedRow).map(k => `\`${k}\``);
             let sql = `INSERT INTO \`${table}\` (${fields.join(',')}) VALUES (${values.map(() => '?').join(',')})`;
             return Mysql.#query(sql, values, context);
         }));
@@ -102,14 +123,9 @@ export class Mysql {
      * @param {{ conflictFields?: string[], updateFields?: string[] }} options
      */
     static async upsert(table, data, { conflictFields = [], updateFields = [] } = {}, context = {}) {
-        if (!data || typeof data !== 'object' || Array.isArray(data)) {
-            throw new CustomError('Invalid data for upsert operation.');
-        }
+        data = Mysql.#sanitizeWriteData(data, 'upsert');
 
         const columns = Object.keys(data);
-        if (columns.length < 1) {
-            throw new CustomError('No fields provided for upsert operation.');
-        }
 
         const updatableFields = (updateFields.length > 0 ? updateFields : columns)
             .filter((field) => !conflictFields.includes(field));
@@ -132,12 +148,7 @@ export class Mysql {
         if (!id) {
             throw new CustomError('No identifier provided for update.');
         }
-        if (!Object.keys(data).length) {
-            throw new CustomError('No data to update.');
-        }
-
-        // remove undefined values
-        data = Object.fromEntries(Object.entries(data).filter(([k,v]) => v !== undefined));
+        data = Mysql.#sanitizeWriteData(data, 'update');
 
         const values = Object.values(data);
         const fielsdSql = Object.entries(data).map(([k,v],i) => {
@@ -151,7 +162,7 @@ export class Mysql {
                     return `\`${k}\` = \`${k}\` - ?`;
                 }
                 else if (typeof v.toSqlString === 'function') {
-                    values[i] = null;
+                    values[i] = Mysql.#rawSqlSentinel;
                     return `\`${k}\` = ${v.toSqlString()}`;
                 }
                 else {
@@ -175,7 +186,7 @@ export class Mysql {
         const sql = `UPDATE \`${table}\` SET ${fielsdSql} WHERE ${id}`;
         // console.log(Mysql.format(sql, data));
         // replicateDB.saveUpdate(table, sql, data, this);
-        const filteredValues = values.filter((value) => value !== null);
+        const filteredValues = values.filter((value) => value !== Mysql.#rawSqlSentinel);
         return Mysql.#query(sql, filteredValues, context);
     }
 
