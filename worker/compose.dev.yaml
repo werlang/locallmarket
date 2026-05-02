@@ -11,8 +11,6 @@ services:
     networks:
       - llm
     command: npm start
-    deploy:
-      replicas: ${WORKER_REPLICAS:-1}
 volumes:
   node_modules_api:
   node_modules_worker:
