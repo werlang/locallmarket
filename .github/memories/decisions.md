@@ -14,3 +14,4 @@
 - Orders are treated as execution records bound to a worker at creation time; legacy standing-order market matching and manual order-management endpoints are removed from the active API surface.
 - Completion-time billing is the authoritative accounting model: total cost is computed from token usage and model price-per-million at job completion, then split by `PLATFORM_FEE_PERCENT` between platform retention and worker-owner earnings.
 - Settlement transactions must verify requester identity matches the consumed order owner before credit mutations to prevent debit mismatch under stale or malformed settlement metadata.
+- Worker identity continuity uses a signed `WORKER_TOKEN` provided by each worker during `worker-register`; missing or invalid tokens mint a new worker identity, while valid tokens reconnect to existing identity records.

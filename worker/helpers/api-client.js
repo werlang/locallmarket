@@ -153,6 +153,7 @@ export class ApiStreamClient {
         const { type, payload } = parsed;
 
         if (type === 'worker-ready-request') {
+            console.log(`[${new Date().toISOString()}] API received worker ready request. Token: ${payload?.token || 'N/A'}`);
             if (!this.busy) {
                 this.sendReady();
             }

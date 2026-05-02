@@ -314,9 +314,9 @@ export class StreamRouter {
             available: false,
             jobId: null
         });
-        console.log(`[${new Date().toISOString()}] Registered worker ${boundWorkerId} with token ${workerIdentity?.token || 'N/A'}`);
+        console.log(`[${new Date().toISOString()}] Registered worker ${boundWorkerId}.`);
 
-        this.requestWorkerReady(ws);
+        this.requestWorkerReady(ws, workerIdentity);
     }
 
     /**
@@ -384,10 +384,17 @@ export class StreamRouter {
         }
 
         const worker = this.getWorkerForSocket(ws);
+        const targetedQueuedJobs = Array.isArray(this.queue.queue)
+            ? this.queue.queue.filter((entry) => entry.targetWorkerId === workerId).length
+            : 0;
 
         ws.activeJobId = null;
 
         if (worker) {
+            console.log(
+                `[${new Date().toISOString()}] Worker ${workerId} disconnected. `
+                + `activeJobId=${activeJobId ?? 'none'} targetedQueuedJobs=${targetedQueuedJobs}.`
+            );
             this.workers.delete(workerId);
             // Persist disconnection only for the active runtime socket session.
             if (this.workersModel) {
@@ -396,6 +403,8 @@ export class StreamRouter {
                         console.error(`[${new Date().toISOString()}] Failed to persist worker disconnect for ${workerId}:`, error);
                     });
             }
+                } else {
+                    console.log(`[${new Date().toISOString()}] Ignored disconnect from stale worker socket ${workerId}.`);
         }
 
         if (activeJobId) {
@@ -545,9 +554,9 @@ export class StreamRouter {
      * Requests an explicit ready notification from a worker socket.
      * @param {import('ws').WebSocket} ws
      */
-    requestWorkerReady(ws) {
+    requestWorkerReady(ws, workerIdentity = null) {
         try {
-            this.wsServer.send(ws, 'worker-ready-request');
+            this.wsServer.send(ws, 'worker-ready-request', workerIdentity);
         } catch (error) {
             console.error('Failed to request worker readiness:', error);
         }

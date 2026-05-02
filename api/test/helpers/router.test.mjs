@@ -126,6 +126,39 @@ test('dispatched (active) targeted job does NOT trigger onJobAborted on worker d
     assert.ok(events.includes('error'), 'error event expected from finishJob on worker disconnect');
 });
 
+test('active worker disconnect persists worker lifecycle state in database', async () => {
+    const wsServer = makeMockWsServer();
+    const disconnectCalls = [];
+
+    const router = new StreamRouter({
+        wsServer,
+        workersModel: {
+            async bindConnectedWorker({ workerId }) {
+                return {
+                    worker: { id: workerId, userId: 'owner-1' },
+                    user: { id: 'owner-1' }
+                };
+            },
+            async markDisconnected(workerId) {
+                disconnectCalls.push(workerId);
+                return undefined;
+            }
+        }
+    });
+
+    const ws = makeMockSocket({ readyState: 1 });
+    wsServer._connect(ws);
+    wsServer._emit('worker-register', ws, { workerId: 'w-db-disconnect' });
+    await new Promise((resolve) => setImmediate(resolve));
+    wsServer._emit('worker-ready', ws);
+
+    ws._emit('close');
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.deepEqual(disconnectCalls, ['w-db-disconnect']);
+    assert.equal(router.workers.has('w-db-disconnect'), false);
+});
+
 test('stale session event is ignored after worker reconnect', () => {
     const wsServer = makeMockWsServer();
     const router = new StreamRouter({ wsServer });

@@ -152,6 +152,10 @@ export class Mysql {
 
         const values = Object.values(data);
         const fielsdSql = Object.entries(data).map(([k,v],i) => {
+            if (v instanceof Date) {
+                return `\`${k}\` = ?`;
+            }
+
             if (v !== null && typeof v === 'object') {
                 if (Object.keys(v)[0] === 'inc'){
                     values[i] = v.inc;

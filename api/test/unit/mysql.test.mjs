@@ -94,6 +94,26 @@ describe('Mysql write payload handling', () => {
         assert.deepEqual(calls[0].data, [ null, 'user-1' ]);
     });
 
+    it('update() preserves Date bindings as parameter values', async () => {
+        const calls = [];
+        const connection = {
+            async execute(sql, data) {
+                calls.push({ sql, data });
+                return [ { affectedRows: 1 } ];
+            }
+        };
+        const disconnectedAt = new Date('2026-05-02T03:10:43.788Z');
+
+        await Mysql.update('workers', {
+            disconnected_at: disconnectedAt,
+            status: 'disconnected'
+        }, 'worker-1', { connection });
+
+        assert.equal(calls.length, 1);
+        assert.equal(calls[0].sql, 'UPDATE `workers` SET `disconnected_at` = ?, `status` = ? WHERE `id` = ?');
+        assert.deepEqual(calls[0].data, [ disconnectedAt, 'disconnected', 'worker-1' ]);
+    });
+
     it('update() throws CustomError when data is null', async () => {
         await assert.rejects(
             Mysql.update('users', null, 'user-1', { connection: { execute: async () => [ [] ] } }),

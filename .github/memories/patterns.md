@@ -16,3 +16,5 @@
 - Integration tests that need the API HTTP server use `process.env.PORT = '0'` and `process.env.API_WS_PORT = '0'` before importing `api/app.js` to get OS-assigned ports. The exported `server` reference is used for cleanup (`server.close()`).
 - Worker unit tests isolate network with `FakeSocket` and `FakeWSServer` classes defined inline. API client tests use a minimal fake `WebSocket` with `.send()` and `.readyState` properties. LLM tests mock `global.fetch`.
 - Named exports only: all classes use `export class Foo {}` — never `export default`. Test files must use `import { Foo } from ...` not `import Foo from ...`.
+- Worker reputation is recomputed from rolling 24h metrics (`uptime_24h_seconds`, `served_requests_24h`) and updated on connect/disconnect plus valid job completion events.
+- Runtime socket events must be gated to the active socket session for that worker; stale replaced-socket events must not persist disconnect or completion-derived state.
