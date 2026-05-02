@@ -10,6 +10,7 @@
 - api1-style success envelopes: use `sendSuccess(res, data)` and `sendCreated(res, data)` from `api/helpers/response.js` for all 2xx JSON responses; never build raw `res.json()` response objects in route handlers.
 - All error cases throw or pass `new HttpError(statusCode, message)`; `errorMiddleware` in `api/middleware/error.js` is the sole terminal Express error handler.
 - `POST /tasks/run` remains the direct-run route for simple message/model payloads; OpenAI-compatible streaming uses `POST /v1/chat/completions` with `stream: true`.
+- OpenAI surface variants should reuse one shared dispatch path for auth, worker selection, worker claim, queue dispatch, and receipt lifecycle; endpoint-specific behavior should be limited to payload normalization and stream-event translation (for example, `POST /v1/chat/completions` and `POST /v1/responses`).
 - OpenAI auto-match selection must enforce offer/worker ownership coherence before trusting price metadata to avoid spoofed or stale off-owner offer influence.
 - When removing legacy endpoints/routes, remove or rewrite stale tests that import deleted modules in the same task and verify cleanup with a repository grep.
 - Reference projects for this codebase live at `.github/references/` (api0–api3, skills0–skills1); always inspect the relevant reference before implementing a new API feature.

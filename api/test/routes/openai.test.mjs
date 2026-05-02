@@ -265,3 +265,108 @@ test('openAiRouterFactory /chat/completions releases worker and fails receipt if
     assert.deepEqual(cleanupCalls.markAvailable, ['worker-1']);
     assert.deepEqual(cleanupCalls.failReceipt, [88]);
 });
+
+test('openAiRouterFactory /responses finds available worker and streams response events', async () => {
+    const originalGetByApiKey = usersModel.getByApiKey;
+    const originalFindWorker = workersModel.findFirstAvailableByModel;
+    const originalMarkBusy = workersModel.markBusy;
+    const originalCreateReceipt = ordersModel.createReceipt;
+
+    const calls = { enqueued: [], cancelled: [] };
+
+    usersModel.getByApiKey = async (apiKey) => {
+        assert.equal(apiKey, 'requester-api-key');
+        return { id: 'requester-2' };
+    };
+
+    workersModel.findFirstAvailableByModel = async (model) => ({
+        id: 'worker-2',
+        userId: 'worker-owner-2',
+        model,
+        tps: 30,
+        price: 3
+    });
+
+    workersModel.markBusy = async () => true;
+
+    ordersModel.createReceipt = async () => ({ id: 100 });
+
+    const router = openAiRouterFactory({
+        streamRouter: {
+            enqueue(job) {
+                calls.enqueued.push(job);
+                return 'job-openai-responses-1';
+            },
+            cancel(jobId) {
+                calls.cancelled.push(jobId);
+            }
+        }
+    });
+
+    const handler = getPostHandler(router, '/responses');
+    const req = {
+        headers: { authorization: 'Bearer requester-api-key' },
+        body: {
+            model: 'gpt-4.1-mini',
+            stream: true,
+            input: [
+                { role: 'system', content: [{ type: 'text', text: 'Keep answers short.' }] },
+                { role: 'user', content: [{ type: 'text', text: 'Say hello' }] }
+            ]
+        }
+    };
+    const res = makeMockRes();
+    const errors = [];
+
+    await handler(req, res, (error) => errors.push(error));
+
+    usersModel.getByApiKey = originalGetByApiKey;
+    workersModel.findFirstAvailableByModel = originalFindWorker;
+    workersModel.markBusy = originalMarkBusy;
+    ordersModel.createReceipt = originalCreateReceipt;
+
+    assert.equal(errors.length, 0);
+    assert.equal(calls.enqueued.length, 1);
+    assert.equal(calls.enqueued[0].payload.message, '[system] Keep answers short.\n[user] Say hello');
+
+    calls.enqueued[0].stream.event('message').send('Hello!');
+    calls.enqueued[0].stream.event('end').send('done');
+
+    const raw = res._written.join('');
+    assert.ok(raw.includes('event: response.created'));
+    assert.ok(raw.includes('event: response.output_text.delta'));
+    assert.ok(raw.includes('"delta":"Hello!"'));
+    assert.ok(raw.includes('event: response.completed'));
+    assert.ok(raw.includes('data: [DONE]'));
+
+    res.emitClose();
+    assert.deepEqual(calls.cancelled, ['job-openai-responses-1']);
+});
+
+test('openAiRouterFactory /responses validates non-empty input', async () => {
+    const originalGetByApiKey = usersModel.getByApiKey;
+
+    usersModel.getByApiKey = async () => ({ id: 'requester-2' });
+
+    const router = openAiRouterFactory({
+        streamRouter: {
+            enqueue() { throw new Error('enqueue should not be called'); },
+            cancel() {}
+        }
+    });
+
+    const handler = getPostHandler(router, '/responses');
+    const req = {
+        headers: { authorization: 'Bearer requester-api-key' },
+        body: { model: 'gpt-4.1-mini', stream: true, input: [] }
+    };
+    const res = makeMockRes();
+    const errors = [];
+
+    await handler(req, res, (error) => errors.push(error));
+
+    usersModel.getByApiKey = originalGetByApiKey;
+
+    assert.equal(errors.length, 1);
+    assert.equal(errors[0].status, 400);
+});
