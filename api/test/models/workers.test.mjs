@@ -3,6 +3,15 @@ import assert from 'node:assert/strict';
 
 import { WorkersModel } from '../../models/workers.js';
 
+const UPTIME_WINDOW_SECONDS = 24 * 60 * 60;
+const SERVED_REQUESTS_TARGET_24H = 1000;
+
+function computeExpectedReputation(seconds, servedRequests = 0) {
+    const uptimeScore = Number(((seconds / UPTIME_WINDOW_SECONDS) * 100).toFixed(6));
+    const requestsScore = Number(((Math.min(servedRequests, SERVED_REQUESTS_TARGET_24H) / SERVED_REQUESTS_TARGET_24H) * 100).toFixed(6));
+    return Number((uptimeScore + requestsScore).toFixed(6));
+}
+
 function createMysqlStub(overrides = {}) {
     return {
         raw(value) {
@@ -149,12 +158,199 @@ test('bindConnectedWorker persists a connected worker under the resolved owner',
     assert.equal(upsertCalls[0].data.price, 1.5);
     assert.equal(upsertCalls[0].data.status, 'available');
     assert.equal(typeof upsertCalls[0].data.connected_at.toSqlString, 'function');
+    assert.equal(typeof upsertCalls[0].data.uptime_window_started_at.toSqlString, 'function');
+    assert.equal(typeof upsertCalls[0].data.served_window_started_at.toSqlString, 'function');
+    assert.equal(upsertCalls[0].data.uptime_24h_seconds, 0);
+    assert.equal(upsertCalls[0].data.served_requests_24h, 0);
+    assert.equal(upsertCalls[0].data.reputation, 0);
     assert.equal(result.user.id, 'user-1');
     assert.equal(result.worker.id, 'worker-1');
     assert.equal(result.worker.userId, 'user-1');
     assert.equal(result.worker.model, 'llama3');
     assert.equal(result.worker.tps, 20);
     assert.equal(result.worker.price, 1.5);
+    assert.equal(result.identity.workerId, 'worker-1');
+    assert.equal(result.identity.ownerId, 'user-1');
+    assert.equal(typeof result.identity.token, 'string');
+    assert.ok(result.identity.token.length > 0);
+});
+
+test('bindConnectedWorker accepts token input and reuses resolved worker identity on reconnect', async () => {
+    const upsertCalls = [];
+    const mysql = createMysqlStub({
+        async upsert(table, data, options) {
+            upsertCalls.push({ table, data, options });
+        },
+        async findOne(table, options) {
+            if (options?.filter?.id === 'worker-existing') {
+                return {
+                    id: 'worker-existing',
+                    user_id: 'user-1',
+                    model: 'llama3',
+                    tps: 20,
+                    price: '1.500000',
+                    status: 'available',
+                    connected_at: '2026-04-30T10:00:00.000Z',
+                    disconnected_at: null,
+                    last_seen_at: '2026-04-30T10:00:00.000Z',
+                    created_at: '2026-04-30T10:00:00.000Z',
+                    updated_at: '2026-04-30T10:00:00.000Z'
+                };
+            }
+
+            return {
+                id: 'worker-1',
+                user_id: 'user-1',
+                model: 'llama3',
+                tps: 20,
+                price: '1.500000',
+                status: 'available',
+                connected_at: '2026-04-30T10:00:00.000Z',
+                disconnected_at: null,
+                last_seen_at: '2026-04-30T10:00:00.000Z',
+                created_at: '2026-04-30T10:00:00.000Z',
+                updated_at: '2026-04-30T10:00:00.000Z'
+            };
+        }
+    });
+
+    const model = new WorkersModel({
+        mysql,
+        users: {
+            async getByApiKeyOrNull() {
+                return { id: 'user-1' };
+            }
+        }
+    });
+
+    const first = await model.bindConnectedWorker({
+        workerId: 'worker-existing',
+        apiKey: 'a'.repeat(64),
+        model: 'llama3',
+        tps: 20,
+        price: 1.5
+    });
+
+    const result = await model.bindConnectedWorker({
+        workerId: 'worker-new-ephemeral',
+        token: first.identity.token,
+        apiKey: 'a'.repeat(64),
+        model: 'llama3',
+        tps: 20,
+        price: 1.5
+    });
+
+    assert.equal(result.identity.workerId, 'worker-existing');
+    assert.equal(result.identity.ownerId, 'user-1');
+    assert.equal(result.identity.token, first.identity.token);
+    assert.equal(upsertCalls[1].data.id, 'worker-existing');
+});
+
+test('bindConnectedWorker issues a new token and registers worker when token is invalid', async () => {
+    const upsertCalls = [];
+    const mysql = createMysqlStub({
+        async upsert(table, data, options) {
+            upsertCalls.push({ table, data, options });
+        },
+        async findOne(table, options) {
+            if (options?.filter?.id === 'worker-new') {
+                return {
+                    id: 'worker-new',
+                    user_id: 'user-1',
+                    model: 'llama3',
+                    tps: 20,
+                    price: '1.500000',
+                    status: 'available',
+                    connected_at: '2026-04-30T10:00:00.000Z',
+                    disconnected_at: null,
+                    last_seen_at: '2026-04-30T10:00:00.000Z',
+                    created_at: '2026-04-30T10:00:00.000Z',
+                    updated_at: '2026-04-30T10:00:00.000Z'
+                };
+            }
+
+            return null;
+        }
+    });
+
+    const model = new WorkersModel({
+        mysql,
+        users: {
+            async getByApiKeyOrNull() {
+                return { id: 'user-1' };
+            }
+        }
+    });
+
+    const result = await model.bindConnectedWorker({
+        workerId: 'worker-new',
+        token: 'w1.invalid.signature',
+        apiKey: 'a'.repeat(64),
+        model: 'llama3',
+        tps: 20,
+        price: 1.5
+    });
+
+    assert.equal(upsertCalls.length, 1);
+    assert.equal(upsertCalls[0].data.id, 'worker-new');
+    assert.equal(result.identity.workerId, 'worker-new');
+    assert.equal(typeof result.identity.token, 'string');
+    assert.notEqual(result.identity.token, 'w1.invalid.signature');
+    const resolved = await model.getByTokenOrNull(result.identity.token);
+    assert.ok(resolved);
+    assert.equal(resolved.id, 'worker-new');
+});
+
+test('getByTokenOrNull resolves worker row only when token owner matches', async () => {
+    const mysql = createMysqlStub({
+        async findOne(table, options) {
+            if (options?.filter?.id === 'worker-token') {
+                return {
+                    id: 'worker-token',
+                    user_id: 'user-1',
+                    model: 'llama3',
+                    tps: 20,
+                    price: '1.500000',
+                    status: 'available',
+                    connected_at: '2026-04-30T10:00:00.000Z',
+                    disconnected_at: null,
+                    last_seen_at: '2026-04-30T10:00:00.000Z',
+                    created_at: '2026-04-30T10:00:00.000Z',
+                    updated_at: '2026-04-30T10:00:00.000Z'
+                };
+            }
+
+            return null;
+        }
+    });
+
+    const model = new WorkersModel({
+        mysql,
+        users: {
+            async getByApiKeyOrNull() {
+                return { id: 'user-1' };
+            }
+        }
+    });
+
+    const registration = await model.bindConnectedWorker({
+        workerId: 'worker-token',
+        apiKey: 'a'.repeat(64),
+        model: 'llama3',
+        tps: 20,
+        price: 1.5
+    });
+
+    const resolved = await model.getByTokenOrNull(registration.identity.token, {
+        expectedOwnerId: 'user-1'
+    });
+    assert.ok(resolved);
+    assert.equal(resolved.id, 'worker-token');
+
+    const mismatched = await model.getByTokenOrNull(registration.identity.token, {
+        expectedOwnerId: 'user-2'
+    });
+    assert.equal(mismatched, null);
 });
 
 test('bindConnectedWorker reconnect keeps ownership immutable and only updates lifecycle fields', async () => {
@@ -199,6 +395,7 @@ test('bindConnectedWorker reconnect keeps ownership immutable and only updates l
     assert.equal(upsertCalls[0].data.model, 'llama3');
     assert.equal(upsertCalls[0].data.status, 'available');
     assert.ok(upsertCalls[0].options.updateFields.includes('model'));
+    assert.equal(upsertCalls[0].options.updateFields.includes('user_id'), false);
     assert.ok(upsertCalls[0].options.updateFields.includes('tps'));
     assert.ok(upsertCalls[0].options.updateFields.includes('price'));
     assert.ok(upsertCalls[0].options.updateFields.includes('status'));
@@ -210,33 +407,36 @@ test('bindConnectedWorker reconnect keeps ownership immutable and only updates l
 });
 
 test('bindConnectedWorker rejects if ownership changes during concurrent registration race', async () => {
-    let findCalls = 0;
     const upsertCalls = [];
+    let racedRow = null;
 
     const mysql = createMysqlStub({
         async upsert(table, data, options) {
             upsertCalls.push({ table, data, options });
-        },
-        async findOne() {
-            findCalls += 1;
 
-            if (findCalls === 1) {
-                return null;
+            // Simulate a race: row appears between pre-check and upsert, owned by another user.
+            if (!racedRow) {
+                racedRow = {
+                    id: 'worker-race',
+                    user_id: 'user-2',
+                    model: 'llama3-old',
+                    tps: 11,
+                    price: '9.990000',
+                    status: 'available',
+                    connected_at: '2026-04-30T10:00:00.000Z',
+                    disconnected_at: null,
+                    last_seen_at: '2026-04-30T10:00:00.000Z',
+                    created_at: '2026-04-30T10:00:00.000Z',
+                    updated_at: '2026-04-30T10:00:00.000Z'
+                };
             }
 
-            return {
-                id: 'worker-race',
-                user_id: 'user-2',
-                model: 'llama3',
-                tps: 20,
-                price: '1.500000',
-                status: 'available',
-                connected_at: '2026-04-30T10:00:00.000Z',
-                disconnected_at: null,
-                last_seen_at: '2026-04-30T10:00:00.000Z',
-                created_at: '2026-04-30T10:00:00.000Z',
-                updated_at: '2026-04-30T10:00:00.000Z'
-            };
+            for (const field of options.updateFields) {
+                racedRow[field] = data[field];
+            }
+        },
+        async findOne() {
+            return racedRow;
         }
     });
 
@@ -256,6 +456,8 @@ test('bindConnectedWorker rejects if ownership changes during concurrent registr
 
     assert.equal(upsertCalls.length, 1);
     assert.equal(upsertCalls[0].table, 'workers');
+    assert.equal(upsertCalls[0].options.updateFields.includes('user_id'), false);
+    assert.equal(racedRow.user_id, 'user-2');
 });
 
 test('markDisconnected persists disconnect timestamps by worker id', async () => {
@@ -276,6 +478,185 @@ test('markDisconnected persists disconnect timestamps by worker id', async () =>
     assert.equal(updateCalls[0].data.status, 'disconnected');
     assert.equal(typeof updateCalls[0].data.disconnected_at.toSqlString, 'function');
     assert.equal(typeof updateCalls[0].data.last_seen_at.toSqlString, 'function');
+    assert.equal(updateCalls[0].data.uptime_24h_seconds, 0);
+    assert.equal(updateCalls[0].data.served_requests_24h, 0);
+    assert.equal(updateCalls[0].data.reputation, 0);
+});
+
+test('incrementServedRequests increments count in active window and updates reputation contribution', async () => {
+    const updateCalls = [];
+    const nowMs = Date.parse('2026-05-01T12:00:00.000Z');
+    const model = new WorkersModel({
+        now: () => nowMs,
+        mysql: createMysqlStub({
+            async findOne() {
+                return {
+                    id: 'worker-served',
+                    user_id: 'user-1',
+                    status: 'disconnected',
+                    connected_at: '2026-05-01T11:45:00.000Z',
+                    uptime_window_started_at: '2026-05-01T10:00:00.000Z',
+                    uptime_24h_seconds: 3600,
+                    served_window_started_at: '2026-05-01T10:00:00.000Z',
+                    served_requests_24h: 4
+                };
+            },
+            async update(table, data, filter) {
+                updateCalls.push({ table, data, filter });
+            }
+        })
+    });
+
+    await model.incrementServedRequests(' worker-served ');
+
+    assert.equal(updateCalls.length, 1);
+    assert.equal(updateCalls[0].table, 'workers');
+    assert.deepEqual(updateCalls[0].filter, { id: 'worker-served' });
+    assert.equal(updateCalls[0].data.uptime_24h_seconds, 3600);
+    assert.equal(updateCalls[0].data.served_requests_24h, 5);
+    assert.equal(updateCalls[0].data.reputation, computeExpectedReputation(3600, 5));
+    assert.ok(updateCalls[0].data.served_window_started_at instanceof Date);
+    assert.equal(updateCalls[0].data.served_window_started_at.toISOString(), '2026-05-01T10:00:00.000Z');
+});
+
+test('incrementServedRequests resets stale 24h served window before incrementing', async () => {
+    const updateCalls = [];
+    const nowMs = Date.parse('2026-05-01T12:00:00.000Z');
+    const model = new WorkersModel({
+        now: () => nowMs,
+        mysql: createMysqlStub({
+            async findOne() {
+                return {
+                    id: 'worker-served-reset',
+                    user_id: 'user-1',
+                    status: 'disconnected',
+                    connected_at: '2026-04-29T11:45:00.000Z',
+                    uptime_window_started_at: '2026-04-29T11:00:00.000Z',
+                    uptime_24h_seconds: 720,
+                    served_window_started_at: '2026-04-29T11:00:00.000Z',
+                    served_requests_24h: 27
+                };
+            },
+            async update(table, data, filter) {
+                updateCalls.push({ table, data, filter });
+            }
+        })
+    });
+
+    await model.incrementServedRequests('worker-served-reset');
+
+    assert.equal(updateCalls.length, 1);
+    assert.equal(updateCalls[0].data.served_requests_24h, 1);
+    assert.ok(updateCalls[0].data.served_window_started_at instanceof Date);
+    assert.equal(updateCalls[0].data.served_window_started_at.toISOString(), '2026-05-01T12:00:00.000Z');
+    assert.equal(updateCalls[0].data.reputation, computeExpectedReputation(0, 1));
+});
+
+test('bindConnectedWorker reconnect accrues uptime delta into 24h metrics and reputation', async () => {
+    const upsertCalls = [];
+    const nowMs = Date.parse('2026-05-01T12:00:00.000Z');
+    const existingWorkerRow = {
+        id: 'worker-uptime',
+        user_id: 'user-1',
+        model: 'llama3',
+        tps: 20,
+        price: '1.500000',
+        status: 'available',
+        connected_at: '2026-05-01T11:30:00.000Z',
+        disconnected_at: null,
+        uptime_window_started_at: '2026-05-01T10:00:00.000Z',
+        uptime_24h_seconds: 1200,
+        served_window_started_at: '2026-05-01T10:00:00.000Z',
+        served_requests_24h: 7,
+        last_seen_at: '2026-05-01T11:30:00.000Z',
+        created_at: '2026-05-01T10:00:00.000Z',
+        updated_at: '2026-05-01T11:30:00.000Z'
+    };
+
+    const mysql = createMysqlStub({
+        async upsert(table, data, options) {
+            upsertCalls.push({ table, data, options });
+        },
+        async findOne(table, options) {
+            if (table !== 'workers') return null;
+
+            if (options?.view?.includes('model')) {
+                return existingWorkerRow;
+            }
+
+            return {
+                id: 'worker-uptime',
+                user_id: 'user-1',
+                status: 'available',
+                connected_at: '2026-05-01T11:30:00.000Z',
+                uptime_window_started_at: '2026-05-01T10:00:00.000Z',
+                uptime_24h_seconds: 1200,
+                served_window_started_at: '2026-05-01T10:00:00.000Z',
+                served_requests_24h: 7
+            };
+        }
+    });
+
+    const model = new WorkersModel({
+        mysql,
+        now: () => nowMs,
+        users: {
+            async getByApiKeyOrNull() {
+                return { id: 'user-1' };
+            }
+        }
+    });
+
+    await model.bindConnectedWorker({
+        workerId: 'worker-uptime',
+        apiKey: 'a'.repeat(64),
+        model: 'llama3',
+        tps: 20,
+        price: 1.5
+    });
+
+    assert.equal(upsertCalls.length, 1);
+    assert.equal(upsertCalls[0].data.uptime_24h_seconds, 3000);
+    assert.equal(upsertCalls[0].data.served_requests_24h, 7);
+    assert.equal(upsertCalls[0].data.reputation, computeExpectedReputation(3000, 7));
+    assert.ok(upsertCalls[0].data.uptime_window_started_at instanceof Date);
+    assert.equal(upsertCalls[0].data.uptime_window_started_at.toISOString(), '2026-05-01T10:00:00.000Z');
+});
+
+test('markDisconnected accrues connected uptime delta and resets stale 24h windows', async () => {
+    const updateCalls = [];
+    const nowMs = Date.parse('2026-05-01T12:00:00.000Z');
+    const model = new WorkersModel({
+        now: () => nowMs,
+        mysql: createMysqlStub({
+            async findOne() {
+                return {
+                    id: 'worker-2',
+                    user_id: 'user-1',
+                    status: 'busy',
+                    connected_at: '2026-04-30T08:00:00.000Z',
+                    uptime_window_started_at: '2026-04-30T08:00:00.000Z',
+                    uptime_24h_seconds: 600,
+                    served_window_started_at: '2026-04-30T08:00:00.000Z',
+                    served_requests_24h: 11
+                };
+            },
+            async update(table, data, filter) {
+                updateCalls.push({ table, data, filter });
+            }
+        })
+    });
+
+    await model.markDisconnected('worker-2');
+
+    assert.equal(updateCalls.length, 1);
+    assert.equal(updateCalls[0].data.uptime_24h_seconds, 0);
+    assert.equal(updateCalls[0].data.served_requests_24h, 0);
+    assert.equal(updateCalls[0].data.reputation, 0);
+    assert.ok(updateCalls[0].data.uptime_window_started_at instanceof Date);
+    assert.equal(updateCalls[0].data.uptime_window_started_at.toISOString(), '2026-05-01T12:00:00.000Z');
+    assert.ok(updateCalls[0].data.served_window_started_at instanceof Date);
+    assert.equal(updateCalls[0].data.served_window_started_at.toISOString(), '2026-05-01T12:00:00.000Z');
 });
 
 test('listPoolByOwner returns owner-scoped workers with runtime state', async () => {

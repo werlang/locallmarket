@@ -6,7 +6,7 @@ import {
     scryptSync
 } from 'crypto';
 
-const API_KEY_ENCRYPTION_SECRET = process.env.API_KEY_ENCRYPTION_SECRET;
+const API_KEY_ENCRYPTION_SECRET = process.env.ENCRYPTION_SECRET;
 const ENCRYPTION_SALT = process.env.ENCRYPTION_SALT;
 const LOOKUP_SALT = process.env.LOOKUP_SALT;
 const ENCRYPTION_ALGORITHM = 'aes-256-gcm';

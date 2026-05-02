@@ -44,6 +44,7 @@ export class StreamRouter {
             }
 
             this.persistWorkerTpsFromCompletion(worker, payload?.jobId, payload?.usage);
+            this.persistWorkerServedRequestFromCompletion(worker, payload?.jobId);
 
             const settlement = this.settleCompletedJobIfNeeded(payload?.jobId, {
                 workerId: worker.id,
@@ -263,17 +264,19 @@ export class StreamRouter {
      * Otherwise, registers the worker locally (for testing/backward compatibility).
      *
      * @param {import('ws').WebSocket & { workerId?: string }} ws
-     * @param {{ workerId?: string, apiKey?: string, model?: string, tps?: number, price?: number }} payload
+      * @param {{ workerId?: string, token?: string, apiKey?: string, model?: string, tps?: number, price?: number }} payload
      */
     async registerWorker(ws, payload) {
         let boundWorkerId;
         let ownerUserId;
+          let workerIdentity = null;
 
         // Try to bind worker to user if workersModel is available
         if (this.workersModel) {
             try {
                 const binding = await this.workersModel.bindConnectedWorker({
                     workerId: payload?.workerId,
+                    token: payload?.token,
                     apiKey: payload?.apiKey,
                     model: payload?.model,
                     tps: payload?.tps,
@@ -281,6 +284,7 @@ export class StreamRouter {
                 });
                 boundWorkerId = binding.worker.id;
                 ownerUserId = binding.user.id;
+                workerIdentity = binding.identity ?? null;
             } catch (error) {
                 console.warn(`[${new Date().toISOString()}] Rejected worker registration: ${error?.message || error}`);
                 ws.terminate?.();
@@ -306,10 +310,11 @@ export class StreamRouter {
             id: boundWorkerId,
             ws,
             ownerId: ownerUserId,
+            identity: workerIdentity,
             available: false,
             jobId: null
         });
-        console.log(`[${new Date().toISOString()}] Registered worker ${boundWorkerId}.`);
+        console.log(`[${new Date().toISOString()}] Registered worker ${boundWorkerId} with token ${workerIdentity?.token || 'N/A'}`);
 
         this.requestWorkerReady(ws);
     }
@@ -384,14 +389,13 @@ export class StreamRouter {
 
         if (worker) {
             this.workers.delete(workerId);
-        }
-
-        // Mark worker as disconnected in persistence (fire-and-forget, errors logged internally)
-        if (this.workersModel) {
-            this.workersModel.markDisconnected(workerId)
-                .catch((error) => {
-                    console.error(`[${new Date().toISOString()}] Failed to persist worker disconnect for ${workerId}:`, error);
-                });
+            // Persist disconnection only for the active runtime socket session.
+            if (this.workersModel) {
+                this.workersModel.markDisconnected(workerId)
+                    .catch((error) => {
+                        console.error(`[${new Date().toISOString()}] Failed to persist worker disconnect for ${workerId}:`, error);
+                    });
+            }
         }
 
         if (activeJobId) {
@@ -690,6 +694,32 @@ export class StreamRouter {
             .catch((error) => {
                 console.error(
                     `[${new Date().toISOString()}] Failed to persist TPS for worker ${worker.id} on job ${jobId}:`,
+                    error?.message || error
+                );
+            });
+    }
+
+    /**
+     * Persists a served-request increment for a successfully completed active job.
+     * Stale completion events are ignored through socket+job validation.
+     *
+     * @param {{ id: string, jobId: string | null }} worker
+     * @param {string | undefined} jobId
+     */
+    persistWorkerServedRequestFromCompletion(worker, jobId) {
+        if (!this.workersModel || typeof this.workersModel.incrementServedRequests !== 'function') {
+            return;
+        }
+
+        if (typeof jobId !== 'string' || jobId !== worker.jobId) {
+            return;
+        }
+
+        this.workersModel
+            .incrementServedRequests(worker.id)
+            .catch((error) => {
+                console.error(
+                    `[${new Date().toISOString()}] Failed to increment served requests for worker ${worker.id} on job ${jobId}:`,
                     error?.message || error
                 );
             });

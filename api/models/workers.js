@@ -1,15 +1,25 @@
 import { HttpError } from '../helpers/error.js';
 import { Mysql } from '../helpers/mysql.js';
 import { usersModel } from './users.js';
+import { createHmac, timingSafeEqual } from 'crypto';
 
 const API_KEY_PATTERN = /^[a-f0-9]{64}$/i;
 const DEFAULT_MIN_TPS = 5;
 const DEFAULT_MAX_PRICE = 100;
+const WORKER_TOKEN_VERSION = 'w1';
+const UPTIME_WINDOW_MS = 24 * 60 * 60 * 1000;
+const SERVED_REQUESTS_WINDOW_MS = 24 * 60 * 60 * 1000;
+const SERVED_REQUESTS_TARGET_24H = 1000;
+
+function getWorkerTokenSecret() {
+    return process.env.ENCRYPTION_SECRET
+}
 
 export class WorkersModel {
-    constructor({ mysql = Mysql, users = usersModel } = {}) {
+    constructor({ mysql = Mysql, users = usersModel, now = () => Date.now() } = {}) {
         this.mysql = mysql;
         this.users = users;
+        this.now = now;
     }
 
     /**
@@ -17,11 +27,12 @@ export class WorkersModel {
      * The worker must authenticate with a valid API key and provide its model,
      * rated tps, and price so consumers can discover it via the public listing.
      *
-     * @param {{ workerId: string, apiKey: string, model: string, tps: number, price: number }} input
-     * @returns {Promise<{ worker: object, user: object }>}
+         * @param {{ workerId: string, token?: string, apiKey: string, model: string, tps: number, price: number }} input
+         * @returns {Promise<{ worker: object, user: object, identity: { workerId: string, token: string | null, ownerId: string } }>}
      */
     async bindConnectedWorker(input) {
-        const workerId = this.#parseWorkerId(input?.workerId);
+        const requestedWorkerId = this.#parseWorkerId(input?.workerId);
+        const token = this.#normalizeToken(input?.token);
         const apiKey = this.#parseApiKey(input?.apiKey);
         const model = this.#parseModel(input?.model);
         const tps = this.#parseTps(input?.tps);
@@ -30,9 +41,17 @@ export class WorkersModel {
         const owner = await this.users.getByApiKeyOrNull(apiKey);
         if (!owner) throw new HttpError(401, 'Invalid API key.');
 
-        const existing = await this.getByIdOrNull(workerId);
-        if (existing && existing.userId !== owner.id)
+        const tokenWorker = token
+            ? await this.getByTokenOrNull(token, { expectedOwnerId: owner.id })
+            : null;
+
+        const workerId = tokenWorker?.id ?? requestedWorkerId;
+
+        const existingRow = await this.#findLifecycleRowByIdOrNull(workerId);
+        if (existingRow && existingRow.user_id !== owner.id)
             throw new HttpError(403, 'Worker identifier already belongs to another user.');
+
+        const lifecycleState = this.#computeLifecycleStateForConnect(existingRow);
 
         await this.mysql.upsert('workers', {
             id: workerId,
@@ -43,17 +62,67 @@ export class WorkersModel {
             status: 'available',
             connected_at: this.mysql.raw('NOW()'),
             disconnected_at: null,
-            last_seen_at: this.mysql.raw('NOW()')
+            last_seen_at: this.mysql.raw('NOW()'),
+            uptime_window_started_at: lifecycleState.uptimeWindowStartedAt,
+            uptime_24h_seconds: lifecycleState.uptimeSeconds,
+            served_window_started_at: lifecycleState.servedWindowStartedAt,
+            served_requests_24h: lifecycleState.servedRequests,
+            reputation: lifecycleState.reputation
         }, {
             conflictFields: ['id'],
-            updateFields: ['user_id', 'model', 'tps', 'price', 'status', 'connected_at', 'disconnected_at', 'last_seen_at']
+            updateFields: ['model', 'tps', 'price', 'status', 'connected_at', 'disconnected_at', 'last_seen_at', 'uptime_window_started_at', 'uptime_24h_seconds', 'served_window_started_at', 'served_requests_24h', 'reputation']
         });
 
         const worker = await this.getByIdOrNull(workerId);
         if (!worker) throw new HttpError(500, 'Worker registration could not be confirmed. Please retry.');
         if (worker.userId !== owner.id) throw new HttpError(403, 'Worker identifier already belongs to another user.');
 
-        return { worker, user: owner };
+        const issuedToken = tokenWorker
+            ? token
+            : this.#createToken({ workerId, ownerId: owner.id });
+
+        return {
+            worker,
+            user: owner,
+            identity: {
+                workerId,
+                token: issuedToken,
+                ownerId: owner.id
+            }
+        };
+    }
+
+    /**
+     * Resolves a worker row from a signed identity token.
+     * @param {string | null | undefined} token
+     * @param {{ expectedOwnerId?: string }} [options]
+     * @returns {Promise<object | null>}
+     */
+    async getByTokenOrNull(token, { expectedOwnerId } = {}) {
+        const normalizedToken = this.#normalizeToken(token);
+        if (!normalizedToken) {
+            return null;
+        }
+
+        const claims = this.#decodeToken(normalizedToken);
+        if (!claims) {
+            return null;
+        }
+
+        if (expectedOwnerId && claims.ownerId !== expectedOwnerId) {
+            return null;
+        }
+
+        const worker = await this.getByIdOrNull(claims.workerId);
+        if (!worker) {
+            return null;
+        }
+
+        if (worker.userId !== claims.ownerId) {
+            return null;
+        }
+
+        return worker;
     }
 
     /**
@@ -62,10 +131,42 @@ export class WorkersModel {
      */
     async markDisconnected(workerId) {
         const id = this.#parseWorkerId(workerId);
+
+        const existingRow = await this.#findLifecycleRowByIdOrNull(id);
+        const lifecycleState = this.#computeLifecycleState(existingRow);
+
         await this.mysql.update('workers', {
             status: 'disconnected',
             disconnected_at: this.mysql.raw('NOW()'),
-            last_seen_at: this.mysql.raw('NOW()')
+            last_seen_at: this.mysql.raw('NOW()'),
+            uptime_window_started_at: lifecycleState.uptimeWindowStartedAt,
+            uptime_24h_seconds: lifecycleState.uptimeSeconds,
+            served_window_started_at: lifecycleState.servedWindowStartedAt,
+            served_requests_24h: lifecycleState.servedRequests,
+            reputation: lifecycleState.reputation
+        }, { id });
+    }
+
+    /**
+     * Increments the worker's served-request count inside the rolling 24h window.
+     * @param {string} workerId
+     */
+    async incrementServedRequests(workerId) {
+        const id = this.#parseWorkerId(workerId);
+        const existingRow = await this.#findLifecycleRowByIdOrNull(id);
+        const lifecycleState = this.#computeLifecycleState(existingRow);
+        const nextServedRequests = lifecycleState.servedRequests + 1;
+
+        await this.mysql.update('workers', {
+            last_seen_at: this.mysql.raw('NOW()'),
+            uptime_window_started_at: lifecycleState.uptimeWindowStartedAt,
+            uptime_24h_seconds: lifecycleState.uptimeSeconds,
+            served_window_started_at: lifecycleState.servedWindowStartedAt,
+            served_requests_24h: nextServedRequests,
+            reputation: computeReputation({
+                uptimeSeconds: lifecycleState.uptimeSeconds,
+                servedRequests: nextServedRequests
+            })
         }, { id });
     }
 
@@ -240,6 +341,98 @@ export class WorkersModel {
         return row ? mapWorkerRow(row) : null;
     }
 
+    async #findLifecycleRowByIdOrNull(workerId) {
+        return this.mysql.findOne('workers', {
+            filter: { id: workerId },
+            view: ['id', 'user_id', 'status', 'connected_at', 'uptime_window_started_at', 'uptime_24h_seconds', 'served_window_started_at', 'served_requests_24h'],
+            opt: { limit: 1 }
+        });
+    }
+
+    #computeLifecycleStateForConnect(existingRow) {
+        if (!existingRow) {
+            return {
+                uptimeWindowStartedAt: this.mysql.raw('NOW()'),
+                uptimeSeconds: 0,
+                servedWindowStartedAt: this.mysql.raw('NOW()'),
+                servedRequests: 0,
+                reputation: 0
+            };
+        }
+
+        return this.#computeLifecycleState(existingRow);
+    }
+
+    #computeLifecycleState(existingRow) {
+        const uptimeState = this.#computeUptimeState(existingRow);
+        const servedRequestsState = this.#computeServedRequestsState(existingRow);
+
+        return {
+            uptimeWindowStartedAt: uptimeState.windowStartedAt,
+            uptimeSeconds: uptimeState.uptimeSeconds,
+            servedWindowStartedAt: servedRequestsState.windowStartedAt,
+            servedRequests: servedRequestsState.servedRequests,
+            reputation: computeReputation({
+                uptimeSeconds: uptimeState.uptimeSeconds,
+                servedRequests: servedRequestsState.servedRequests
+            })
+        };
+    }
+
+    #computeUptimeState(existingRow) {
+        const nowMs = this.now();
+        const fallbackWindowStartMs = nowMs;
+
+        let windowStartedAtMs = parseTimestampMs(existingRow?.uptime_window_started_at)
+            ?? parseTimestampMs(existingRow?.connected_at)
+            ?? fallbackWindowStartMs;
+
+        let uptimeSeconds = normalizeNonNegativeInt(existingRow?.uptime_24h_seconds);
+
+        if (nowMs - windowStartedAtMs >= UPTIME_WINDOW_MS) {
+            windowStartedAtMs = nowMs;
+            uptimeSeconds = 0;
+        }
+
+        if (isConnectedStatus(existingRow?.status)) {
+            const connectedAtMs = parseTimestampMs(existingRow?.connected_at);
+            if (connectedAtMs != null) {
+                const countedStartMs = Math.max(connectedAtMs, windowStartedAtMs);
+                if (nowMs > countedStartMs) {
+                    uptimeSeconds += Math.floor((nowMs - countedStartMs) / 1000);
+                }
+            }
+        }
+
+        const elapsedWithinWindowSeconds = Math.max(0, Math.floor((nowMs - windowStartedAtMs) / 1000));
+        const normalizedUptimeSeconds = Math.max(0, Math.min(uptimeSeconds, elapsedWithinWindowSeconds, UPTIME_WINDOW_MS / 1000));
+
+        return {
+            windowStartedAt: new Date(windowStartedAtMs),
+            uptimeSeconds: normalizedUptimeSeconds
+        };
+    }
+
+    #computeServedRequestsState(existingRow) {
+        const nowMs = this.now();
+        const fallbackWindowStartMs = nowMs;
+
+        let windowStartedAtMs = parseTimestampMs(existingRow?.served_window_started_at)
+            ?? fallbackWindowStartMs;
+
+        let servedRequests = normalizeNonNegativeInt(existingRow?.served_requests_24h);
+
+        if (nowMs - windowStartedAtMs >= SERVED_REQUESTS_WINDOW_MS) {
+            windowStartedAtMs = nowMs;
+            servedRequests = 0;
+        }
+
+        return {
+            windowStartedAt: new Date(windowStartedAtMs),
+            servedRequests
+        };
+    }
+
     #parseWorkerId(workerId) {
         if (typeof workerId !== 'string' || workerId.trim().length < 1 || workerId.trim().length > 128)
             throw new HttpError(400, 'workerId must be a non-empty string up to 128 characters.');
@@ -250,6 +443,73 @@ export class WorkersModel {
         const normalized = apiKey.trim();
         if (!API_KEY_PATTERN.test(normalized)) throw new HttpError(401, 'Invalid API key.');
         return normalized;
+    }
+    #normalizeToken(token) {
+        if (typeof token !== 'string') {
+            return null;
+        }
+
+        const normalized = token.trim();
+
+        if (normalized.length < 1 || normalized.length > 256) {
+            return null;
+        }
+
+        return normalized;
+    }
+    #createToken({ workerId, ownerId }) {
+        const payload = Buffer.from(JSON.stringify({ workerId, ownerId }), 'utf8').toString('base64url');
+        const signature = this.#signTokenPayload(payload);
+        return `${WORKER_TOKEN_VERSION}.${payload}.${signature}`;
+    }
+    #decodeToken(token) {
+        const parts = token.split('.');
+        if (parts.length !== 3 || parts[0] !== WORKER_TOKEN_VERSION) {
+            return null;
+        }
+
+        const payload = parts[1];
+        const signature = parts[2];
+        const expectedSignature = this.#signTokenPayload(payload);
+        if (!this.#isValidSignature(signature, expectedSignature)) {
+            return null;
+        }
+
+        try {
+            const parsed = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+            if (typeof parsed?.workerId !== 'string' || parsed.workerId.trim().length < 1) {
+                return null;
+            }
+
+            if (typeof parsed?.ownerId !== 'string' || parsed.ownerId.trim().length < 1) {
+                return null;
+            }
+
+            return {
+                workerId: parsed.workerId.trim(),
+                ownerId: parsed.ownerId.trim()
+            };
+        } catch {
+            return null;
+        }
+    }
+    #signTokenPayload(payload) {
+        return createHmac('sha256', getWorkerTokenSecret())
+            .update(payload, 'utf8')
+            .digest('base64url');
+    }
+    #isValidSignature(received, expected) {
+        if (typeof received !== 'string' || typeof expected !== 'string') {
+            return false;
+        }
+
+        const receivedBuffer = Buffer.from(received, 'utf8');
+        const expectedBuffer = Buffer.from(expected, 'utf8');
+        if (receivedBuffer.length !== expectedBuffer.length) {
+            return false;
+        }
+
+        return timingSafeEqual(receivedBuffer, expectedBuffer);
     }
     #parseOwnerId(ownerId) {
         if (typeof ownerId !== 'string' || ownerId.trim().length < 1 || ownerId.trim().length > 128)
@@ -329,4 +589,51 @@ function normalizeCompletionTokens(usage) {
     if (Number.isFinite(totalTokens) && Number.isFinite(promptTokens) && totalTokens > promptTokens)
         return totalTokens - promptTokens;
     return 0;
+}
+
+function parseTimestampMs(value) {
+    if (value == null) {
+        return null;
+    }
+
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeNonNegativeInt(value) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || parsed < 0) {
+        return 0;
+    }
+
+    return Math.floor(parsed);
+}
+
+function isConnectedStatus(status) {
+    return status === 'available' || status === 'busy';
+}
+
+function computeReputation({ uptimeSeconds, servedRequests }) {
+    const uptimeScore = computeUptimeScore(uptimeSeconds);
+    const servedRequestsScore = computeServedRequestsScore(servedRequests);
+    return Number((uptimeScore + servedRequestsScore).toFixed(6));
+}
+
+function computeUptimeScore(uptimeSeconds) {
+    if (!Number.isFinite(uptimeSeconds) || uptimeSeconds <= 0) {
+        return 0;
+    }
+
+    const ratio = uptimeSeconds / (UPTIME_WINDOW_MS / 1000);
+    return Number((ratio * 100).toFixed(6));
+}
+
+function computeServedRequestsScore(servedRequests) {
+    if (!Number.isFinite(servedRequests) || servedRequests <= 0) {
+        return 0;
+    }
+
+    const normalizedServedRequests = Math.floor(servedRequests);
+    const ratio = Math.min(normalizedServedRequests, SERVED_REQUESTS_TARGET_24H) / SERVED_REQUESTS_TARGET_24H;
+    return Number((ratio * 100).toFixed(6));
 }

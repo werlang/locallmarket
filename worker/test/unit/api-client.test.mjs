@@ -59,8 +59,15 @@ test('ApiStreamClient.sendToSocket', async (t) => {
 });
 
 test('ApiStreamClient.handleSocketOpen', async (t) => {
-    await t.test('registers with worker id and api key, then marks ready', () => {
-        const client = new ApiStreamClient({ workerId: 'w1', apiKey: 'a'.repeat(64) });
+    await t.test('registers with identity and runtime metadata, then marks ready', () => {
+        const client = new ApiStreamClient({
+            workerId: 'w1',
+            workerToken: 'token-1',
+            apiKey: 'a'.repeat(64),
+            model: 'ai/model-1',
+            tps: 25,
+            price: 1.5
+        });
         const socket = new FakeSocket();
         client.socket = socket;
 
@@ -71,7 +78,11 @@ test('ApiStreamClient.handleSocketOpen', async (t) => {
             type: 'worker-register',
             payload: {
                 workerId: 'w1',
-                apiKey: 'a'.repeat(64)
+                token: 'token-1',
+                apiKey: 'a'.repeat(64),
+                model: 'ai/model-1',
+                tps: 25,
+                price: 1.5
             }
         });
         assert.deepEqual(socket.sent[1], {

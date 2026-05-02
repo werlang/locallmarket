@@ -186,6 +186,7 @@ test('targeted job without onJobAborted does not error on worker disconnect', ()
 test('job-complete persists observed worker TPS using completion usage and elapsed job time', async () => {
     const wsServer = makeMockWsServer();
     const updateCalls = [];
+    const servedCalls = [];
     const originalNow = Date.now;
 
     const router = new StreamRouter({
@@ -206,6 +207,10 @@ test('job-complete persists observed worker TPS using completion usage and elaps
             async updatePerformanceTps(input) {
                 updateCalls.push(input);
                 return 30;
+            },
+            async incrementServedRequests(workerId) {
+                servedCalls.push(workerId);
+                return undefined;
             }
         }
     });
@@ -244,6 +249,7 @@ test('job-complete persists observed worker TPS using completion usage and elaps
             startedAtMs: 1000,
             completedAtMs: 3000
         });
+        assert.deepEqual(servedCalls, ['w-tps']);
         assert.equal(router.activeJobs.has(jobId), false);
     } finally {
         Date.now = originalNow;
@@ -253,6 +259,7 @@ test('job-complete persists observed worker TPS using completion usage and elaps
 test('job-complete from stale replaced socket is ignored for TPS persistence', async () => {
     const wsServer = makeMockWsServer();
     const updateCalls = [];
+    const servedCalls = [];
 
     const router = new StreamRouter({
         wsServer,
@@ -269,6 +276,10 @@ test('job-complete from stale replaced socket is ignored for TPS persistence', a
             async updatePerformanceTps(input) {
                 updateCalls.push(input);
                 return 25;
+            },
+            async incrementServedRequests(workerId) {
+                servedCalls.push(workerId);
+                return undefined;
             }
         }
     });
@@ -300,5 +311,87 @@ test('job-complete from stale replaced socket is ignored for TPS persistence', a
     await new Promise((resolve) => setImmediate(resolve));
 
     assert.equal(updateCalls.length, 0);
+    assert.equal(servedCalls.length, 0);
     assert.equal(router.activeJobs.has(jobId), true);
+});
+
+test('stale replaced socket close does not persist disconnect for active worker session', async () => {
+    const wsServer = makeMockWsServer();
+    const disconnectCalls = [];
+
+    const router = new StreamRouter({
+        wsServer,
+        workersModel: {
+            async bindConnectedWorker({ workerId }) {
+                return {
+                    worker: { id: workerId, userId: 'owner-1' },
+                    user: { id: 'owner-1' }
+                };
+            },
+            async markDisconnected(workerId) {
+                disconnectCalls.push(workerId);
+                return undefined;
+            }
+        }
+    });
+
+    const wsOld = makeMockSocket({ readyState: 1 });
+    wsServer._connect(wsOld);
+    wsServer._emit('worker-register', wsOld, { workerId: 'w-replaced-disconnect' });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const wsNew = makeMockSocket({ readyState: 1 });
+    wsServer._connect(wsNew);
+    wsServer._emit('worker-register', wsNew, { workerId: 'w-replaced-disconnect' });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    wsOld._emit('close');
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(disconnectCalls.length, 0);
+
+    wsNew._emit('close');
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(disconnectCalls, ['w-replaced-disconnect']);
+});
+
+test('registerWorker passes token payload to workersModel and stores bound identity', async () => {
+    const wsServer = makeMockWsServer();
+    const bindCalls = [];
+
+    const router = new StreamRouter({
+        wsServer,
+        workersModel: {
+            async bindConnectedWorker(input) {
+                bindCalls.push(input);
+                return {
+                    worker: { id: 'worker-identity', userId: 'owner-1' },
+                    user: { id: 'owner-1' },
+                    identity: { workerId: 'worker-identity', token: 'token-1', ownerId: 'owner-1' }
+                };
+            }
+        }
+    });
+
+    const ws = makeMockSocket({ readyState: 1 });
+    wsServer._connect(ws);
+    wsServer._emit('worker-register', ws, {
+        workerId: 'worker-identity',
+        token: 'token-1',
+        apiKey: 'a'.repeat(64),
+        model: 'llama3',
+        tps: 20,
+        price: 1.5
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(bindCalls.length, 1);
+    assert.equal(bindCalls[0].token, 'token-1');
+
+    const registered = router.workers.get('worker-identity');
+    assert.ok(registered);
+    assert.deepEqual(registered.identity, {
+        workerId: 'worker-identity',
+        token: 'token-1',
+        ownerId: 'owner-1'
+    });
 });
