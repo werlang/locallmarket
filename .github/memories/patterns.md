@@ -1,21 +1,90 @@
 # Patterns
 
-- In compose development, each worker replica needs its own mounted `/app/node_modules` volume plus package-lock-aware dependency hydration to avoid stale shared dependencies and cross-replica install races.
-- Keep SQL isolated inside the MySQL driver module (`api/helpers/mysql.js`) and expose persistence through public driver methods only; no raw SQL in routers/helpers/models/middleware.
-- If a query is needed and no driver method exists, add a new generic driver method instead of inlining SQL in model/helper/route code.
-- Keep MySQL driver methods business-agnostic.
-- Entity business logic is exclusively owned by models and must not be implemented in routers/helpers/middleware/driver.
-- Helpers are limited to cross-entity/non-entity business logic.
-- For API-key scoped execution APIs, resolve requester identity from bearer API key and enforce ownership in model transactions before mutating orders or credits.
-- api1-style success envelopes: use `sendSuccess(res, data)` and `sendCreated(res, data)` from `api/helpers/response.js` for all 2xx JSON responses; never build raw `res.json()` response objects in route handlers.
-- All error cases throw or pass `new HttpError(statusCode, message)`; `errorMiddleware` in `api/middleware/error.js` is the sole terminal Express error handler.
-- `POST /tasks/run` remains the direct-run route for simple message/model payloads; OpenAI-compatible streaming uses `POST /v1/chat/completions` with `stream: true`.
-- OpenAI surface variants should reuse one shared dispatch path for auth, worker selection, worker claim, queue dispatch, and receipt lifecycle; endpoint-specific behavior should be limited to payload normalization and stream-event translation (for example, `POST /v1/chat/completions` and `POST /v1/responses`).
-- OpenAI auto-match selection must enforce offer/worker ownership coherence before trusting price metadata to avoid spoofed or stale off-owner offer influence.
-- When removing legacy endpoints/routes, remove or rewrite stale tests that import deleted modules in the same task and verify cleanup with a repository grep.
-- Reference projects for this codebase live at `.github/references/` (api0–api3, skills0–skills1); always inspect the relevant reference before implementing a new API feature.
-- Integration tests that need the API HTTP server use `process.env.PORT = '0'` and `process.env.API_WS_PORT = '0'` before importing `api/app.js` to get OS-assigned ports. The exported `server` reference is used for cleanup (`server.close()`).
-- Worker unit tests isolate network with `FakeSocket` and `FakeWSServer` classes defined inline. API client tests use a minimal fake `WebSocket` with `.send()` and `.readyState` properties. LLM tests mock `global.fetch`.
-- Named exports only: all classes use `export class Foo {}` — never `export default`. Test files must use `import { Foo } from ...` not `import Foo from ...`.
-- Worker reputation is recomputed from rolling 24h metrics (`uptime_24h_seconds`, `served_requests_24h`) and updated on connect/disconnect plus valid job completion events.
-- Runtime socket events must be gated to the active socket session for that worker; stale replaced-socket events must not persist disconnect or completion-derived state.
+## Route Organization
+
+- **Direct Exports**: `api/routes/users.js` exports `const router = express.Router()`
+- **Factory Functions**: `api/routes/tasks.js`, `api/routes/workers.js`, `api/routes/openai.js` export factories
+  - Example: `export function tasksRouterFactory({ streamRouter }) { ... }`
+  - Allows dependency injection of `StreamRouter`, models, helpers
+- **Consistency Gap**: Mixed styles should be reconciled in future refactoring
+- Routes stay thin: parse request → call model → send response (orchestration only)
+
+## Response Envelopes (api1 style)
+
+- **Success**: `{ ok: true, body: ... }` via `sendSuccess(res, data)` (200 status)
+- **Created**: `{ ok: true, body: ... }` via `sendCreated(res, data)` (201 status)
+- **Errors**: Throw `new HttpError(statusCode, message)`; caught by `errorMiddleware`
+- **Never**: Build raw `res.json()` objects in route handlers
+- **Example**: `throw new HttpError(409, 'No workers available for model')`
+
+## Model Layer Ownership
+
+- **Models own entity business logic** (users, workers, orders)
+- Routers, helpers, middleware, driver must NOT implement entity logic
+- Models invoke persistence through driver methods only
+- Example: `WorkersModel.bindConnectedWorker()` validates + upserts; `UsersModel.chargeCredits()` enforces balance rules
+
+## SQL Confinement Pattern
+
+- **All SQL lives in**: `api/helpers/mysql.js` (MySQL driver)
+- **Driver exports**: Generic methods: `find()`, `insert()`, `update()`, `upsert()`, `raw()`
+- **No raw SQL** in routes, models, helpers, or middleware
+- **If new query needed**: Add generic driver method, not inline SQL
+- **Driver constraint**: Keep methods business-agnostic; no policy logic
+
+## Testing Patterns
+
+- **Framework**: Node.js built-in `node:test` (no external libraries)
+- **File Extensions**: `.mjs` for all test files
+- **Structure**: `api/test/unit/`, `api/test/models/`, `api/test/routes/`, `api/test/helpers/`, `api/test/drivers/`
+- **Named Exports Only**: `export class Foo {}` (never default exports)
+  - Test imports: `import { Foo } from './file.js'`
+- **Fakes/Mocks**:
+  - `FakeSocket`: minimal `{ readyState, send() }`
+  - `FakeWSServer`: for worker testing
+  - Stub MySQL driver with `{ raw(), upsert(), update(), findOne(), ... }`
+  - Mock `global.fetch` for LLM tests
+- **Assertions**: `node:assert/strict` with descriptive messages
+  - `assert.equal(actual, expected, 'should verify...')`
+- **Integration Tests**: Use `PORT='0'` and `API_WS_PORT='0'` before importing `api/app.js` for OS-assigned ports
+  - Import `server` export for cleanup: `server.close()`
+
+## Worker Binding Immutability
+
+- Worker `user_id` set once on initial insert into `workers` table
+- **Never updated on reconnect** — only `status`, `connected_at`, `disconnected_at`, `last_seen_at` change
+- **Security**: Prevents worker hijacking via concurrent registration with different API keys
+- **Implementation**: `WorkersModel.bindConnectedWorker()` must enforce immutability in upsert logic
+- **Post-upsert Check**: Verify persisted `user_id` matches expected owner; reject if mismatch
+
+## Error Handling Contract
+
+- Routers/models/helpers throw `HttpError(statusCode, message)` or `Error`
+- `errorMiddleware` in `api/middleware/error.js` catches and formats:
+  - `HttpError` → `{ ok: false, error: { code, message } }` with appropriate status
+  - Other errors → 500 with safe message
+- **Terminal Handler**: Express error handler must be last middleware
+
+## Worker Session Management
+
+- Each worker maintains one active WebSocket connection to API
+- Runtime events (job-dispatch, chunk, completion) tied to active socket session
+- **Stale Event Protection**: Replaced-socket events must not update worker state
+  - Late chunks from disconnected socket should be ignored
+  - Completion/failure from old socket should not mark new socket's job completed
+- Active job tracking per socket prevents cross-socket state corruption
+
+## OpenAI Surface Conventions
+
+- Shared dispatch path for auth, worker selection, queue, receipt lifecycle
+- Endpoint-specific behavior limited to: payload normalization, stream-event translation
+- **No Self-Orders**: Consumer ≠ worker owner; enforce in model before order creation
+- **Ownership Coherence**: Before trusting worker price/tps, verify offer owner matches worker owner
+  - Prevents spoofed or stale off-owner rows from influencing selection
+
+## Developer Integration
+
+- Reference projects at `.github/references/` (api0–api3 for Express patterns)
+- **Always consult** `.github/references/api1/` before implementing new API features
+- When removing endpoints: also remove/update stale tests, verify cleanup with grep
+- Favor clean architecture over legacy compatibility patches (project not launched yet)

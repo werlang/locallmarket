@@ -1,466 +1,478 @@
-# Orderbook
+# LocalLMarket
 
-Marketplace where API users register workers as rentable orderbook entries and consumers purchase streamed LLM access with per-order credit deduction.
+**🤝 Peer-to-peer LLM compute marketplace. Anyone can contribute GPU power and earn. Anyone can access affordable AI.**
 
-Core design constraints:
+---
 
-- Workers connect outbound to the API over WebSocket; the API owns all client-facing routes.
-- API HTTP composition is intentionally thin: `api/app.js` wires middleware/startup and mounts resource routers from `api/routes/`.
-- Database interactions must go through MySQL driver methods only (current driver module: `api/helpers/mysql.js`). No raw SQL is allowed outside the driver.
-- `GET /ready` on the API reports worker capacity and queue depth.
-- Schema creation and schema changes are managed by explicit SQL scripts/migrations executed outside app runtime.
+## 💡 The Problem
 
-## Services
+LLM inference is expensive. OpenAI, Claude, Gemini—they all charge premium prices because they own the compute. Meanwhile, millions of people and businesses have idle GPU capacity: a gaming PC, a cloud instance running 4 hours a day, a research lab with spare hardware.
 
-| Service | Folder | Host Port | Responsibility |
-| --- | --- | --- | --- |
-| `api` | `api/` | `80` | Client-facing `GET /ready`, `POST /tasks/run`, `GET /workers/pool`, `POST /v1/chat/completions`, queueing, SSE relay, worker WebSocket server |
-| `worker` | `worker/` | not published by compose | Outbound WebSocket client that executes model streams and returns chunk events |
-| MySQL | external | `3306` | Persistent store for users and orders; required when `MYSQL_ENABLED=true` |
+Why should all that compute go unused? Why should consumers pay centralized prices when free-market competition could drive costs down by 10x or 100x?
 
-## Runtime Flow
+## 🎯 The Solution
 
-### Worker Registration and Binding
+**LocalLMarket** is a peer-to-peer marketplace where:
 
-1. A provider registers a user account via `POST /users/users`, which generates a unique API key.
-2. The worker service connects to the API WebSocket endpoint (`ws://.../ws/workers`) and sends a `worker-register` message with its `workerId` and the user's API key in the payload.
-3. The API validates the API key against the registered user and permanently binds the worker to that user. The binding is immutable: once a worker is bound to a user, the binding cannot be changed, protecting against hijacking attacks under concurrent registration attempts.
-4. Bound workers are recorded in the `workers` table with `user_id` ownership and status tracking (`connected`, `disconnected`).
+- **Workers** (anyone with a GPU) register a model, set their own price, and earn credits per completed request.
+- **Consumers** find the best-priced worker meeting their needs and call the model via a simple API.
+- **The platform** matches orders, streams responses, settles payments, and tracks reputation.
 
-### Stream Task Dispatch
+**No gatekeepers. No middlemen. Just fair-market pricing and community compute.**
 
-1. A client can submit a direct run task using `POST /tasks/run` with `{ "model", "message" }` (or `input` alias).
-2. The API enqueues the task in `StreamRouter` and starts an SSE response stream.
-3. The router dispatches queued work to a compatible connected worker over `/ws/workers`.
-4. Worker chunk events are relayed back to the HTTP stream (`message`, `end`, `error`).
+---
 
-### OpenAI-Compatible Dispatch
+## 🚀 Why LocalLMarket?
 
-1. A client calls `POST /v1/chat/completions` with bearer API key auth and `stream: true`.
-2. The API resolves the requester identity, finds the first available offer for the requested model, consumes that existing offer, and dispatches to the selected worker.
-3. The response is streamed as OpenAI chunk-style SSE and ends with `[DONE]`.
+| Feature | LocalLMarket | Centralized APIs |
+|---------|--------------|-----------------|
+| **Pricing** | Free market competition | Fixed, premium rates |
+| **Decentralization** | Anyone can contribute compute | Single point of failure |
+| **Control** | Run any model, fine-tune yours | Limited model selection |
+| **Community** | Join a peer network, earn back | Extract value, no stake |
+| **Transparency** | See all pricing, all workers | Black box |
 
-## API Contract
+### Honest Limitations
 
-### `GET /ready`
+- **Worker honesty**: We can't cryptographically verify workers return correct output (mitigation: reputation scoring, consumer feedback)
+- **Reputation system**: Currently simple (24h uptime tracking)
+- **UI**: Headless for now; worker dashboard and consumer dashboard to come in future releases
 
-Returns current API queue depth and worker capacity.
+---
 
-```json
-{
-  "ok": true,
-  "connectedWorkers": 5,
-  "availableWorkers": 5,
-  "activeJobs": 0,
-  "queuedJobs": 0
-}
+## 📊 How It Works
+
+```
+┌──────────────┐
+│   Consumer   │
+│  (Your App)  │
+└──────┬───────┘
+       │ "I need gpt-3.5 for $0.01/MTks"
+       │
+       ▼
+┌────────────────────────────┐
+│   LocalLMarket API Server  │ ◄─── WebSocket ─── Worker 1 (llama-2, $0.005/MTks)
+│                            │ ◄─── WebSocket ─── Worker 2 (llama-2, $0.008/MTks)
+│  • Order matching          │ ◄─── WebSocket ─── Worker 3 (gpt-3.5 fine-tune, $0.002/MTks)
+│  • Price discovery         │
+│  • Streaming relay         │
+│  • Payment settlement      │
+└────────────────────────────┘
+       │
+       ▼ Stream response (OpenAI format)
+┌──────────────┐
+│   Response   │ "The answer is..."
+│   (SSE)      │
+└──────────────┘
+```
+
+### How It Works: 3 Personas
+
+#### 1️⃣ **Workers** — Turn Compute into Earnings
+
+**What you do:**
+- Register your machine and model on LocalLMarket
+- Set your own price (per million tokens)
+- Listen for incoming requests
+- Run LLM inference on your hardware
+- Stream output back to the consumer
+- Get credited per completed job
+
+**Getting Started:**
+```bash
+# Step 1: Create account and get API key from POST /users
+# Step 2: Register your model
+WORKER_API_KEY=your_key_here WORKER_MODEL=llama-2 WORKER_PRICE=0.005 docker compose -f worker/compose.dev.yaml up -d --build
+```
+
+**Pricing Strategy:**
+- You set the rate. Lower price → more demand → higher volume.
+- Set fair rates → build reputation → consistent long-term earnings.
+- Optimize hardware. More efficient = higher margins.
+
+---
+
+#### 2️⃣ **Consumers** — Access Affordable AI
+
+**What you do:**
+- Create account and get API key
+- Search available workers and models
+- Call any model via OpenAI-compatible API
+- System automatically picks the best worker (lowest price, meets your constraints)
+- Stream response back to your app
+- Get billed per million tokens used
+
+**Getting Started:**
+```bash
+# Step 1: Create account and get API key
+curl -X POST http://localhost/users \
+  -H "Content-Type: application/json" \
+  -d '{"username":"alice","email":"alice@email.com"}'
+
+# Step 2: Check available workers
+curl http://localhost/workers/public
+
+# Step 3: Call a model (OpenAI-compatible)
+curl http://localhost/v1/chat/completions \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "llama-2",
+    "messages": [{"role": "user", "content": "Hello!"}],
+    "stream": true,
+  }'
+```
+
+**Python Example:**
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    api_key="YOUR_API_KEY",
+    base_url="http://localhost"
+)
+
+response = client.chat.completions.create(
+    model="llama-2",
+    messages=[{"role": "user", "content": "Explain p2p markets"}],
+    stream=True
+)
+
+for chunk in response:
+    print(chunk.choices[0].delta.content, end="")
 ```
 
 ---
 
-### `GET /workers/pool`
+#### 3️⃣ **Developers** — Build on LocalLMarket
 
-Returns a public snapshot of the current worker pool, combining persisted worker bindings/offers with live runtime status.
+**What to do:**
+- Clone the repo and explore the architecture
+- Run the stack locally with Docker Compose
+- Integrate the OpenAI-compatible API into your app
+- Test with real workers
+- Deploy to production or self-host
 
-- Header: `Authorization: Bearer <api_key>`
-- Response `200`: `{ "ok": true, "workers": [...] }`
-- Returns `401` when bearer auth is missing/invalid.
+**Getting Started:**
+```bash
+# Clone and setup
+git clone https://github.com/locallmarket/locallmarket.git
+cd locallmarket
 
-Worker objects include:
+# Start the API (port 80)
+docker compose -f api/compose.yaml up -d --build
 
-- `id`
-- `status`, `connected`, `available`, `activeJobId`
-- `model`, `price`, `tps`, `offerId`
-- `connectedAt`, `disconnectedAt`, `lastSeenAt`, `createdAt`, `updatedAt`
+# Start a worker (outbound WebSocket to API)
+docker compose -f worker/compose.dev.yaml up -d --build
 
-This endpoint is visibility-safe by design: it resolves requester auth but only returns public pool information (no owner identifiers).
+# Test the health endpoint
+curl http://localhost/ready
 
-### `GET /workers/pool/me`
+# Run the test suite
+npm test
 
-Returns an owner-scoped worker snapshot for the authenticated provider.
-
-- Header: `Authorization: Bearer <api_key>`
-- Response `200`: `{ "ok": true, "workers": [...] }`
-- Returns `401` when bearer auth is missing/invalid.
-
----
-
-### Worker Registration and API Key Binding
-
-#### WebSocket Worker Registration
-
-Workers connect via WebSocket at `ws://<api-host>/ws/workers` and send a `worker-register` message:
-
-```json
-{
-  "type": "worker-register",
-  "payload": {
-    "workerId": "worker-001",
-    "apiKey": "<user-api-key>",
-    "hostname": "worker-hostname",
-    "pid": 12345
-  }
-}
-```
-
-On successful registration:
-- The API validates the `apiKey` against the user account and binds the worker to that user.
-- The worker is recorded in the `workers` table with immutable `user_id` ownership.
-- Worker status transitions to `connected`.
-- Orders owned by the same user are eligible for auto-matching with this worker.
-
-Security: API keys are stored encrypted at rest with AES-256-GCM and indexed by a keyed lookup digest, so request-time authentication remains a cheap indexed lookup instead of plaintext comparison. Worker-to-user binding is immutable after initial registration. Duplicate registration attempts for the same `workerId` by different API keys will be rejected, preventing accidental or malicious worker hijacking.
-
-Concurrency safety detail: after upsert, ownership is re-read from persistence and compared with the authenticated user. If ownership does not match, registration is rejected.
-
----
-
-### Users
-
-Users routes are mounted at `/users`. The current router paths include an extra `/users` segment, so the effective endpoints are `/users/users` and `/users/users/:apiKey/...`.
-
-#### `POST /users/users`
-
-Registers a new user account.
-
-- Request body: `{ "name"?: string, "email"?: string }`
-- Response `201`: `{ "ok": true, "user": { id, name, email, credits, createdAt, updatedAt } }`
-
-#### `GET /users/users`
-
-Lists all registered users with optional pagination.
-
-- Query params: `limit` (default 50, max 100), `offset` (default 0)
-- Response `200`: `{ "ok": true, "users": [...] }`
-
-#### `GET /users/users/:apiKey`
-
-Returns a single user profile.
-
-- Response `200`: `{ "ok": true, "user": {...} }` or `404` if not found.
-
-#### `PUT /users/users/:apiKey`
-
-Updates mutable user fields (`name`, `email`).
-
-- Request body: `{ "name"?: string, "email"?: string }`
-- Response `200`: `{ "ok": true, "user": {...} }`
-
-#### `POST /users/users/:apiKey/recharge`
-
-Adds credits to a user account.
-
-- Request body: `{ "amount": number }` (must be positive)
-- Response `200`: `{ "ok": true, "user": {...} }`
-
-#### `POST /users/users/:apiKey/reset`
-
-Rotates the caller API key.
-
-- Response `200`: `{ "ok": true, "user": {...}, "apiKey": "..." }`
-
-#### `DELETE /users/users/:apiKey`
-
-Deletes a user account and cascades to owned orders.
-
-- Response `200`: `{ "ok": true }`
-
----
-
-### Stream Tasks
-
-#### `POST /tasks/run`
-
-Enqueues a stream task and returns an SSE stream relayed from a connected worker.
-
-- Request body: `{ "model": string, "message": string }` (`input` is accepted as an alias for `message`)
-- The connection stays open while chunks are streamed (`message`, `end`, `error`).
-
----
-
-### Orders
-
-Orders routes are mounted at `/orders`.
-
-#### `GET /orders`
-
-Lists orders owned by the authenticated user.
-
-- Header: `Authorization: Bearer <api_key>`
-- Response `200`: `{ "ok": true, "orders": [...] }`
-
-#### `GET /orders/public`
-
-Lists currently available public marketplace offers.
-
-- Response `200`: `{ "ok": true, "orders": [...] }`
-
-#### `POST /orders`
-
-Creates a worker-bound provider offer.
-
-- Header: `Authorization: Bearer <api_key>`
-- Request body: `{ "workerId": string, "model": string, "price": number, "tps": number, "enabled"?: boolean }`
-- Response `201`: `{ "ok": true, "order": {...} }`
-
-#### `PUT /orders/:orderId`
-
-Updates mutable fields of an owner order (`workerId`, `model`, `price`, `tps`).
-
-- Header: `Authorization: Bearer <api_key>`
-- Response `200`: `{ "ok": true, "order": {...} }`
-
-#### `DELETE /orders/:orderId`
-
-Deletes an owner order.
-
-- Header: `Authorization: Bearer <api_key>`
-- Response `200`: `{ "ok": true }`
-
-#### `POST /orders/:orderId/enable`
-
-Enables an owner order for marketplace matching.
-
-- Header: `Authorization: Bearer <api_key>`
-- Response `200`: `{ "ok": true, "order": {...} }`
-
-#### `POST /orders/:orderId/disable`
-
-Disables an owner order from marketplace matching.
-
-- Header: `Authorization: Bearer <api_key>`
-- Response `200`: `{ "ok": true, "order": {...} }`
-
----
-
-### OpenAI-Compatible Streaming
-
-#### `POST /v1/chat/completions`
-
-OpenAI-compatible streaming route.
-
-- Header: `Authorization: Bearer <api_key>`
-- Request body: `{ "model": string, "messages": [...], "stream": true }`
-- Behavior:
-  - Resolves requester identity from bearer API key.
-  - Selects the first available offer for the requested model.
-  - Consumes the selected existing offer, then dispatches to the selected worker.
-  - Streams OpenAI chunk-style SSE output and ends with `[DONE]`.
-  - Uses shared SSE header behavior from `api/helpers/stream.js` (single header policy).
-- Returns `409` when no worker is available for the requested model.
-
----
-
-## Workers Table and Schema
-
-The `workers` table stores bindings between worker instances and user accounts. It is created via `api/schema.sql` and includes:
-
-| Column | Type | Constraints | Purpose |
-|--------|------|-------------|----------|
-| `id` | VARCHAR(128) | PRIMARY KEY | Worker instance identifier |
-| `user_id` | VARCHAR(128) | NOT NULL, FK → users(id) | Owner user; immutable after initial binding |
-| `status` | VARCHAR(24) | DEFAULT 'connected' | Connection state: `connected`, `disconnected` |
-| `connected_at` | DATETIME | DEFAULT CURRENT_TIMESTAMP | Timestamp of most recent connection |
-| `disconnected_at` | DATETIME | NULL | Timestamp of most recent disconnection |
-| `last_seen_at` | DATETIME | NOT NULL | Timestamp of last activity |
-| `created_at` | DATETIME | DEFAULT CURRENT_TIMESTAMP | Account creation time |
-| `updated_at` | DATETIME | AUTO UPDATE | Last modification time |
-
-Indexes: `user_id`, `status`, `(user_id, status)` for fast lookups during matching and availability checks.
-
-See `api/schema.sql` for the full CREATE TABLE statement.
-
----
-
-## Architecture Conventions
-
-### SQL Confinement
-
-**All SQL lives exclusively in the MySQL driver module (`api/helpers/mysql.js`).**
-
-Routes, models, helpers, and middleware must not embed raw SQL. If persistence behavior is missing, add a new public driver method and consume that method from model code.
-
-### Schema Management
-
-MySQL is opt-in. When `MYSQL_ENABLED=false` (the default), the API starts without a database and persistence-backed routes (users, workers pool, OpenAI order-backed dispatch) return `503`. Set `MYSQL_ENABLED=true` and provide connection env vars to enable persistence.
-
-API key encryption requires `API_KEY_ENCRYPTION_SECRET` in the API environment. Use a long random secret and keep it stable across restarts so stored keys remain decryptable.
-
-For existing databases, apply `api/migrations/20260430_encrypt_user_api_keys_phase1.sql`, run `node scripts/migrate-user-api-keys.mjs` from `api/`, then apply `api/migrations/20260430_encrypt_user_api_keys_phase2.sql`.
-
-Do not create or alter schema at application startup. Apply schema changes through versioned SQL scripts/migrations and run them manually on the target connection.
-
-### Layer Ownership
-
-- MySQL driver stays generic and business-logic free.
-- Models are the exclusive owners of entity business logic.
-- Entity business logic must not be implemented in routers, helpers, middleware, or the driver.
-- Models perform SQL operations through driver methods.
-- Routers stay thin: request parsing/validation, response shaping, and calls into models/helpers only.
-- Helpers own only cross-entity/non-entity business logic (for example: pricing and worker availability checks).
-
-### Architecture Direction
-
-Prioritize clean current architecture over legacy compatibility patches because this project is pre-launch.
-
-### References as Standard
-
-When a task asks to follow references, treat `.github/references/` (especially `api1`) as mandatory implementation guidance.
-
----
-
-## Repository Layout
-
-```text
-api/
-  app.js                 # API entrypoint and worker WebSocket server
-  compose.yaml           # API compose file (host port 80 → container 3000)
-  Dockerfile
-  package.json
-  helpers/
-    error.js             # HttpError: HTTP-safe error type
-    auth.js              # Bearer API key parsing helpers
-    mysql.js             # MySQL driver and SQL confinement boundary
-    orders.js            # Shared payload parsers for task/openai dispatch inputs
-    queue.js             # FIFO queue for pending stream jobs
-    router.js            # StreamRouter: worker registration, targeted dispatch, job lifecycle
-    response.js          # HTTP success response helpers
-    stream.js            # SSE stream helpers and header application
-    users.js             # User parse/validate helpers
-    wsserver.js          # WSServer: typed WebSocket server for worker messages
-  middleware/
-    error.js             # JSON error envelope middleware
-  models/
-    orders.js            # OrdersModel: offer/order business logic over drivers
-    users.js             # UsersModel: user business logic over UsersDriver
-    workers.js           # WorkersModel: worker ownership, visibility, and TPS updates
-  routes/
-    orders.js            # /orders CRUD + public/owner order listing
-    openai.js            # /v1/chat/completions OpenAI-compatible streaming
-    tasks.js             # /tasks/run direct stream task endpoint
-    users.js             # /users/users* account routes
-    workers.js           # /workers/pool public and /workers/pool/me owner worker visibility
-  test/
-    helpers/             # Helper-level tests (auth/orders/router/users)
-    integration/         # Integration tests for worker binding and stream flows
-    models/              # Model-level tests (orders/users/workers)
-    routes/              # Route tests (openai/tasks/workers)
-    unit/                # Unit tests for shared helpers/middleware
-  compose.yaml           # API compose stack; publishes API on host port 80
-
-worker/
-  app.js                 # Worker entrypoint and outbound API WebSocket client
-  compose.dev.yaml       # Worker development compose file (no exposed ports)
-  Dockerfile
-  package.json
-  helpers/
-    api-client.js        # Worker socket lifecycle and job relay
-    error.js             # Worker-side HTTP/model error types
-  middleware/
-    error.js             # Worker HTTP error envelope middleware
-  model/
-    llm.js               # Model runner SSE parser used by stream jobs
-  routes/
-    system.js            # Local worker `/ready` endpoint for process checks
-  compose.dev.yaml       # Worker dev compose stack
+# See full API reference in .github/skills/api-development/SKILL.md
 ```
 
 ---
 
-## Running Locally
+## 🏗️ Architecture Overview
 
-### Docker Compose (with MySQL)
-
-```sh
-docker compose -f api/compose.yaml up -d --build api
-docker compose -f worker/compose.dev.yaml up -d --build worker
-curl -sS http://127.0.0.1/ready
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    LocalLMarket API Server                  │
+│                                                             │
+│  ┌────────────────────┐    ┌──────────────────────────┐   │
+│  │  HTTP Routes       │    │  Worker WebSocket Server │   │
+│  │                    │    │                          │   │
+│  │ • POST /users      │    │ • Worker registration   │   │
+│  │ • GET /workers/pool│    │ • Job dispatch          │   │
+│  │ • POST /v1/chat    │    │ • Stream relay          │   │
+│  │ • GET /orders      │    │ • Heartbeat monitoring  │   │
+│  │ • GET /ready       │    │                          │   │
+│  └────────────────────┘    └──────────────────────────┘   │
+│                                                             │
+│               ┌──────────────────────────┐                 │
+│               │  Order Queue & Matching  │                 │
+│               │                          │                 │
+│               │ • Price discovery        │                 │
+│               │ • Worker selection       │                 │
+│               │ • Job state tracking     │                 │
+│               └──────────────────────────┘                 │
+│                                                             │
+│               ┌──────────────────────────┐                 │
+│               │    MySQL Database        │                 │
+│               │                          │                 │
+│               │ • Users & API keys       │                 │
+│               │ • Workers & offers       │                 │
+│               │ • Orders & billing       │                 │
+│               │ • Reputation scores      │                 │
+│               └──────────────────────────┘                 │
+└─────────────────────────────────────────────────────────────┘
+         △                                      △
+         │                                      │
+    HTTP │ (Consumer)              WebSocket │ (Worker)
+         │                                      │
+    Consumer App                          Worker Service
 ```
 
-The API compose file publishes the API on `127.0.0.1:80` and the worker compose file keeps workers internal to the `llm` compose network.
+**Key Design Principles:**
 
-### API Standalone
+- **API owns the HTTP surface** and worker queue; thin composition root (`api/app.js`)
+- **Workers connect outbound** via WebSocket; API doesn't initiate connections
+- **Settlement happens per-job**: Consumer credits deducted → Worker credits incremented
+- **Reputation updated every 24h**: Uptime tracking, request count, reputation score
 
-```sh
-cd api
-npm install
-# Without MySQL (streaming infra only):
-PORT=3300 node app.js
-# With MySQL:
-PORT=3300 \
-MYSQL_ENABLED=true \
-MYSQL_HOST=127.0.0.1 \
-MYSQL_USER=root \
-MYSQL_PASSWORD=secret \
-MYSQL_DATABASE=orderbook \
-node app.js
+---
+
+## 📋 API Reference
+
+### Public Health Check
+```
+GET /ready
+Response: { "ok": true, "connectedWorkers": 5, "availableWorkers": 4, "activeJobs": 2, "queuedJobs": 0 }
 ```
 
-### Worker Standalone
+### User Management
+```
+POST /users                    # Create account
+GET /users                     # Get profile
+PUT /users                     # Update profile settings (max_price, min_tps)
+POST /users/recharge           # Recharge account credits
+POST /users/reset              # Reset account API Key
+```
 
-```sh
+### Worker Pool & Management
+```
+GET /workers                   # See all my registered workers (requires auth)
+GET /workers/public            # See all public workers available for matching
+POST /workers                  # Register a worker
+```
+
+### Orders & Billing
+```
+GET /orders                    # Your order history
+POST /v1/chat/completions      # Call a model (OpenAI-compatible)
+POST /v1/responses             # Call a model with OpenAI Responses API
+```
+
+**For full details, see** [.github/skills/api-development/SKILL.md](.github/skills/api-development/SKILL.md)
+
+---
+
+## 🛠️ For Workers: Getting Started
+
+### Requirements
+- **Hardware**: GPU (recommended) or multi-core CPU
+- **Software**: Python 3.8+, any LLM runtime (vLLM, ollama, llama.cpp)
+- **Network**: Stable internet, outbound WebSocket access to API server
+
+### Setup
+
+**Option 1: Docker (Recommended)**
+```bash
+# Clone repo
+git clone https://github.com/locallmarket/locallmarket.git
+cd locallmarket/worker
+
+# Build the worker container
+docker build -t locallmarket-worker .
+
+# Run with your API key
+docker run -e WORKER_API_KEY=your_key_here \
+           -e WORKER_MODEL=llama-2 \
+           -e WORKER_PRICE=0.005 \
+           -e WORKER_TPS=50 \
+           locallmarket-worker
+```
+
+**Option 2: Local Development**
+```bash
 cd worker
 npm install
-PORT=3301 \
-API_WS_URL=ws://127.0.0.1:3300/ws/workers \
-MODEL_RUNNER_HOST=http://127.0.0.1:3900 \
-node app.js
+WORKER_API_KEY=your_key WORKER_MODEL=llama-2 npm start
 ```
 
-Choose different `PORT` values so the worker's local health server does not collide with the API.
+### Configuration
+
+| Env Var | Example | Purpose |
+|---------|---------|---------|
+| `WORKER_API_KEY` | `sk_abc123` | Your API key from LocalLMarket |
+| `WORKER_MODEL` | `llama-2` | Model name to advertise |
+| `WORKER_PRICE` | `0.005` | Price per request (in credits) |
+| `WORKER_TPS` | `50` | Throughput (requests per second) |
+| `API_ENDPOINT` | `http://api.locallmarket.com` | API server URL |
+
+### Monitoring Your Earnings
+```bash
+# Check your worker status
+curl http://api.locallmarket.com/workers \
+  -H "Authorization: Bearer YOUR_API_KEY"
+
+# Response includes: activeJobs, completedJobs, totalEarnings, uptime%, reputation
+```
+
+### Pricing Strategy Tips
+- **Undercut competitors**: If others charge $0.01, try $0.008 → more demand
+- **Build reputation**: Consistent, fair pricing → long-term trust → stable volume
+- **Monitor peers**: Use `/workers/public` to see competitor pricing in real-time
+- **Optimize hardware**: Faster execution = higher TPS = more requests/earnings
 
 ---
 
-## Environment Variables
+## 💳 For Consumers: Getting Started
 
-### API
+### Requirements
+- **Account**: Free signup with email (You get an API key)
+- **Network**: HTTPS access to API endpoint
+- **Integration**: Your app (Python, Node.js, curl, anything)
 
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `PORT` | `3000` | API listen port |
-| `API_WS_PORT` | `3000` | Port for the WebSocket server that workers connect to |
-| `WORKER_ROUTE` | `/ws/workers` | WebSocket path used by workers to register and receive jobs |
-| `NODE_ENV` | unset | Controls whether error payloads include debug data |
+### Setup
 
-### Worker
+**Step 1: Create Account**
+```bash
+curl -X POST http://localhost/users \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "User",
+    "email": "user@example.com",
+  }'
+# Returns: { "ok": true, "apiKey": "..." }
+```
 
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `PORT` | `3000` | Local worker HTTP port for `/ready` health check |
-| `API_WS_URL` | `ws://127.0.0.1:3000/ws/workers` | Outbound WebSocket URL for API registration |
-| `MODEL_RUNNER_HOST` | unset | Base URL for the model runner SSE API |
-| `MODEL_RUNNER_MODEL` | unset | Default model name when a request does not supply one |
-| `NODE_ENV` | unset | Controls whether worker error payloads include debug data |
+**Step 2: Add Credits**
+```bash
+curl -X POST http://localhost/users/recharge \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "amount": 100 }'  # 100 credits
+```
+
+**Step 3: Explore Workers**
+```bash
+curl http://localhost/workers/public \
+```
+
+**Step 4: Call a Model**
+```bash
+curl -X POST http://localhost/v1/chat/completions \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "llama-2",
+    "messages": [
+      { "role": "system", "content": "You are helpful." },
+      { "role": "user", "content": "What is 2+2?" }
+    ],
+    "stream": true,
+    "temperature": 0.7,
+    "max_tokens": 100
+  }'
+```
+
+### Constraints (Optional)
+Update your user preferences to control cost and performance:
+```json
+{
+  "max_price": 0.01,           // Don't use workers charging > $0.01/req
+  "min_tps": 50,               // Don't use workers with < 50 req/sec throughput
+}
+```
+
+### Node.js Example
+```javascript
+const OpenAI = require('openai');
+
+const client = new OpenAI({
+  apiKey: process.env.LOCALLMARKET_API_KEY,
+  baseURL: 'http://localhost'
+});
+
+async function chat() {
+  const stream = await client.chat.completions.create({
+    model: 'llama-2',
+    messages: [{ role: 'user', content: 'Hello!' }],
+    stream: true
+  });
+
+  for await (const chunk of stream) {
+    process.stdout.write(chunk.choices[0]?.delta?.content || '');
+  }
+}
+
+chat();
+```
 
 ---
 
-## Running Tests
+## Known Limitations & Roadmap
 
-### Worker
+**Can we verify workers are honest?**
+- ⚠️ **Today**: No cryptographic proof. We rely on reputation and consumer feedback.
+- **Future**: 
+  - Dispute resolution system for consumer complaints
 
-```sh
-cd worker && npm test
+---
+
+## 🐛 Contributing
+
+Found a bug? Have a feature idea? Want to run a worker? We'd love your help!
+
+### For Bug Reports & Features
+1. Open an issue on [GitHub](https://github.com/locallmarket/locallmarket/issues)
+2. Follow the template and provide reproduction steps
+3. Describe what you expected vs. what happened
+
+### For Code Contributions
+1. Read [.github/instructions.md](.github/instructions.md)
+2. Fork the repo, create a branch, make your changes
+3. Add tests and run the test suite (`npm test`)
+4. Submit a pull request with a clear description
+5. Our team will review and merge
+
+### For Workers
+- Join the network and contribute GPU power
+- Set competitive pricing
+- Help other workers and consumers on community forums
+- Share feedback on how we can improve
+
+### Testing Locally
+```bash
+# Install dependencies
+npm install
+
+# Run unit and integration tests
+npm test
+
+# Run tests with coverage
+npm test -- --coverage
+
+# Lint
+npm run lint
 ```
 
-Unit-only or integration-only:
+---
 
-```sh
-cd worker && npm run test:unit
-cd worker && npm run test:integration
-```
+## 📚 More Resources
 
-### API
+- **API Development**: [.github/skills/api-development/SKILL.md](.github/skills/api-development/SKILL.md)
+- **Testing Guide**: [.github/skills/api-testing/SKILL.md](.github/skills/api-testing/SKILL.md)
+- **Docker Setup**: [.github/skills/docker-deployment/SKILL.md](.github/skills/docker-deployment/SKILL.md)
+- **Bug Review**: [.github/skills/backend-bug-review/SKILL.md](.github/skills/backend-bug-review/SKILL.md)
 
-```sh
-cd api && npm test
-```
+---
 
-Unit-only or integration-only:
+## 📜 License
 
-```sh
-cd api && npm run test:unit
-cd api && npm run test:integration
-```
+LocalLMarket is released under the **MIT License**. See [LICENSE](LICENSE) for details.
 
-The API suite covers route behavior (`tasks`, `workers/pool`, OpenAI stream), worker registration/binding safety, queue/stream helpers, and model persistence logic (`users`, `orders`, `workers`).
+### Community
+
+- **GitHub Issues**: [Report bugs or request features](https://github.com/locallmarket/locallmarket/issues)
+- **Discussions**: [Community chat and ideas](https://github.com/locallmarket/locallmarket/discussions)
+- **Email**: [support@locallmarket.com](mailto:support@locallmarket.com)
+
+---
+
+**Ready to join the peer-to-peer compute revolution? Start as a worker, consumer, or developer today.** 🚀
 

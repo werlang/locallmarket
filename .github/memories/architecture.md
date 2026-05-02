@@ -1,40 +1,79 @@
 # Architecture
 
-- The API service is the only client-facing HTTP surface: it exposes `GET /ready`, `GET /workers/pool` (owner-scoped worker pool snapshot), `POST /tasks/run` (legacy direct run), and `POST /v1/chat/completions` (OpenAI-compatible streaming), maintains the in-memory request queue, and accepts worker connections on `/ws/workers`.
-- Worker containers do not handle client stream requests directly; they keep persistent outbound WebSocket connections to the API and receive queued jobs there.
-- `api/app.js` mounts users as a direct router export and mounts workers/tasks/openai through router factory functions. It also constructs `WSServer` + `StreamRouter`, wires `ordersModel.streamRouter`, and defines `/ready` inline before 404/error middleware.
-- Route modules currently use mixed export styles: `api/routes/users.js` exports a router instance, while `api/routes/tasks.js`, `api/routes/workers.js`, and `api/routes/openai.js` export factory functions.
-- Routers stay thin and limited to request/response orchestration.
-- Models are the exclusive owners of entity business logic and are the layer that triggers persistence through MySQL driver methods.
-- Entity business logic must not be implemented in routers, helpers, middleware, or the MySQL driver.
-- Helpers are limited to cross-entity/non-entity domain behavior.
-- MySQL driver remains generic and reusable; keep business-specific policy out of driver methods.
-- `api/app.js` exports `app`, `server` (the Node.js HTTP server returned by `app.listen()`), and `streamRouter`. The `server` export is required by integration tests.
-- Tests are split into `api/test/` (unit + integration) and `worker/test/` (unit + integration). Both use Node.js built-in `node:test` with `.mjs` files.
-- Compose topology: `api/compose.yaml` starts the API on port 80:3000; `worker/compose.dev.yaml` starts workers with no published ports on the external `llm` bridge network.
-- Favor clean current architecture over legacy compatibility patching because this project is not launched yet.
+## Service Topology
 
-## Worker Binding and Persistence Architecture
+**Three-tier distributed system**:
+- **API Service** (port 3000): HTTP REST surface + WebSocket server for inbound worker connections
+- **Worker Service**: Outbound WebSocket client to API; executes LLM jobs; no inbound server
+- **MySQL** (optional): Persistent user/worker/order records; enabled via `MYSQL_ENABLED=true`
 
-- Workers bind to users via API key validation on the `/ws/workers` handshake. The worker sends its `workerId` and the user's `apiKey` in the `worker-register` message.
-- `StreamRouter.registerWorker()` invokes `WorkersModel.bindConnectedWorker()` to validate the API key and upsert the worker into the `workers` table with immutable `user_id` ownership.
-- Worker-to-user binding is immutable: the `user_id` is set only on initial insert; updates only refresh `status`, `connected_at`, `disconnected_at`, and `last_seen_at`. This prevents worker hijacking under concurrent registration by different API keys.
-- Binding safety includes a post-upsert ownership recheck; concurrent registration races that result in mismatched persisted ownership are rejected.
-- The `workers` table schema includes ownership (`user_id`) and status tracking (`connected`, `disconnected`); indexes on `user_id`, `status`, and `(user_id, status)` enable fast queries during matching.
-- Orders reference `worker_id` and retain their own `user_id` ownership; both the order creator (provider) and order consumer (client) must be distinct users (no self-orders).
-- `GET /workers/pool` resolves user identity from bearer API key and returns only that user's workers, overlaying runtime connection/job state with latest offer metadata (`model`, `price`, `tps`).
+## Request Flow
 
-## Order Execution and Settlement Flow
+```
+Consumer:           POST /v1/chat/completions
+                            ↓
+API (routes/openai.js):     Resolve user identity from Bearer token
+                            Retrieve max_price, min_tps constraints
+                            ↓
+OrdersModel:                Find first available worker (price ASC, tps DESC)
+                            Create order record: { requester_id, worker_id, status: 'running' }
+                            ↓
+StreamRouter:               Enqueue job to worker via WebSocket
+                            ↓
+Worker (WebSocket):         Receive job dispatch
+                            Execute LLM model
+                            Stream chunks back to API
+                            Send job-complete with token usage
+                            ↓
+API (StreamRouter):         Relay chunks as SSE to consumer
+                            On completion: settle order (debit consumer, credit worker owner)
+                            Mark order: status='completed'
+```
 
-- Orders are internal execution records used by OpenAI-compatible dispatch and settlement.
-- OpenAI-compatible requests (`POST /v1/chat/completions`) auto-select a compatible available worker offer, create an internal order, consume it for use, and enqueue the job to that worker.
-- Worker completion events update observed TPS for active offers of the same worker/model using completion tokens over elapsed execution time.
-- Billing settlement is triggered on completion through `StreamRouter` settlement hooks that call `ordersModel.settleCompletedOrder(...)`.
-- On job abort before completion, compensating refund/unconsume logic restores order and credit state.
+## Layer Ownership
 
-## User Settings and Worker Matching Constraints
+| Layer | Responsibility |
+|-------|----------------|
+| **Routes** | Parse HTTP request, call model, send response (thin orchestration only) |
+| **Models** | Entity business logic, validation, state transitions, persistence via driver |
+| **Helpers** | Cross-entity domain logic (auth parsing, stream relay, error handling) |
+| **Driver** | Generic SQL methods (find, insert, update, upsert); never business logic |
+| **Middleware** | Express error handler (terminal 5xx catcher) |
 
-- The `users` table has nullable `max_price DECIMAL(18,6)` and `min_tps INT UNSIGNED` columns. Users who have not configured constraints get NULL (no restriction applied during matching).
-- `POST /v1/chat/completions` enforces the requester's `maxPrice` and `minTps` settings when selecting a worker offer: only offers at or below `maxPrice` and at or above `minTps` are candidates.
-- `OrdersModel.findFirstAvailableOfferByModel(model, { maxPrice, minTps })` orders by `price ASC, tps DESC` (cheapest first, highest TPS as tiebreaker) and applies DB-level operator filters (`{ '<=': maxPrice }`, `{ '>=': minTps }`) in addition to in-loop connectivity/ownership guards.
-- `Mysql.find` `opt.order` supports multi-column ordering via an object of `{ col: 1|-1, ... }` entries; all entries are emitted as `ORDER BY col1 ASC, col2 DESC`.
+**Key Rule**: Business logic lives exclusively in models; routers/helpers/middleware/driver must not implement entity logic.
+
+## Worker Binding and Persistence
+
+- Workers bind to users via API key validation on `/ws/workers` WebSocket handshake
+- `WorkersModel.bindConnectedWorker()` validates API key → resolves user → upserts worker record
+- **Immutability Guarantee**: `user_id` set once on insert, never updated on reconnect
+  - Prevents hijacking via concurrent registration by different API keys
+  - Post-upsert ownership recheck rejects mismatched persisted binding
+- Indexes on `(user_id)`, `(status)`, `(user_id, status)` enable efficient matching queries
+- No self-orders: `requester_id ≠ worker_owner_id`
+
+## Order and Settlement Flow
+
+- OpenAI requests auto-select worker → create internal order → dispatch job → relay chunks
+- Completion triggers settlement: debit consumer credits, credit worker owner (minus platform fee)
+- Failure compensation: order marked failed, consumer credits restored
+- Observed TPS updated on completion from token usage / elapsed execution time
+
+## Consumer Matching Constraints
+
+- Users set optional `max_price` and `min_tps` on account
+- Worker matching enforces: `price <= max_price AND tps >= min_tps`
+- Selection order: `price ASC, tps DESC` (cheapest first, TPS tie-breaker)
+
+## Deployment Topology
+
+- `api/compose.yaml`: API on port 80:3000
+- `worker/compose.dev.yaml`: Workers on `llm` bridge network (no external ports)
+- Each worker replica has mounted `/app/node_modules` to avoid shared dependency races
+
+## App Composition
+
+- `api/app.js` exports: `app` (Express instance), `server` (HTTP server), `streamRouter`
+- Routes: mixed export styles (direct router vs factory functions — see patterns.md)
+- Constructs: `WSServer` + `StreamRouter`, wires `ordersModel.streamRouter`, `/ready` health check
+- `server` export required by integration tests for cleanup via `server.close()`

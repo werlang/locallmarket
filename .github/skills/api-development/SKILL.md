@@ -1,103 +1,298 @@
 ---
 name: api-development
-description: Build and maintain the API and Worker services for this LLM streaming relay project. Use when adding or modifying routes, request validation, SSE relay logic, queue behavior, WebSocket server events, or LLM model runner integration.
+description: Build and maintain the API and Worker services for this LLM streaming relay project. Use when adding or modifying routes, request validation, SSE relay logic, queue behavior, WebSocket server events, LLM model runner integration, or marketplace order/settlement flows.
 ---
 
 # API Development
 
-## Service Overview
+## Architecture Overview
 
-Two services cooperate to relay LLM completions from a model runner to HTTP clients as Server-Sent Events:
+LocalLMarket is a peer-to-peer LLM compute marketplace. Workers (providers) register to the API over WebSocket and expose computational capacity. Consumers submit streaming requests, which the API matches to available workers, handles billing, and relays output as Server-Sent Events.
 
-- **`api/`** — Express HTTP server. Accepts client stream requests, queues them, and dispatches to a registered worker via WebSocket. Relays SSE chunks back to the waiting client.
-- **`worker/`** — Express HTTP health server + outbound WebSocket client. Receives job payloads from the API, calls the LLM model runner, and sends stream events back through the socket.
+**Two services:**
+- **`api/`** — Express HTTP server. Owns client-facing routes, worker WebSocket server, job queue, SSE relay, user/worker/order database models.
+- **`worker/`** — Express HTTP health server + persistent outbound WebSocket client. Registers to API, processes dispatched jobs by calling LLM runner, sends stream events back.
 
-## API Shape (`api/`)
+## HTTP API Endpoints
 
-Base app: `api/app.js`
+Base URL: `http://localhost/` (port 80 via compose)
 
-Global middleware: `express.json()`, `express.urlencoded()`, terminal error middleware.
+### Health & Status
 
-Routes:
-- `GET /ready` — health check; returns queue and worker capacity
-- `POST /stream` — accepts a client LLM request; relays SSE back
+| Method | Path | Auth | Returns | Purpose |
+|--------|------|------|---------|---------|
+| `GET` | `/ready` | none | `{ ok, connectedWorkers, availableWorkers, activeJobs, queuedJobs }` | Readiness probe; queue/worker snapshot |
 
-### `GET /ready` Response
+### Tasks (Direct Stream Dispatch)
 
+| Method | Path | Auth | Returns | Purpose |
+|--------|------|------|---------|---------|
+| `POST` | `/tasks/run` | none | `text/event-stream` | Enqueue a legacy streaming task |
+
+**Request body:**
 ```json
-{
-  "ok": true,
-  "connectedWorkers": 1,
-  "availableWorkers": 1,
-  "activeJobs": 0,
-  "queuedJobs": 0
+{ "message": "Say hello", "model": "ai/smollm2" }
+```
+(`input` alias also accepted for `message`). On success, returns SSE stream with events: `message` (chunk), `end` (completion), `error` (failure).
+
+### Workers
+
+| Method | Path | Auth | Returns | Purpose |
+|--------|------|------|---------|---------|
+| `GET` | `/workers` | Bearer token | `{ ok, workers: [...] }` | Owner-scoped workers (authenticated requester only) |
+| `GET` | `/workers/public` | none | `{ ok, workers: [...] }` | Public worker pool (id, model, tps, price, status, availability) |
+
+### Orders (Execution Receipts)
+
+| Method | Path | Auth | Returns | Purpose |
+|--------|------|------|---------|---------|
+| `GET` | `/orders` | Bearer token | `{ ok, orders: [...] }` | Authenticated requester's past execution receipts |
+
+**Order object:** `{ id, requester_id, worker_id, model, price, tps, status, started_at, completed_at, created_at, updated_at }`
+
+### OpenAI-Compatible Streaming
+
+| Method | Path | Auth | Returns | Purpose |
+|--------|------|------|---------|---------|
+| `POST` | `/v1/chat/completions` | Bearer token | `text/event-stream` | Match consumer → worker → stream result (billing-aware) |
+| `POST` | `/v1/responses` | Bearer token | `text/event-stream` | Alternative completion endpoint |
+
+**Request body (OpenAI subset):**
+```json
+{ "model": "ai/smollm2", "messages": [...], "stream": true }
+```
+
+Worker matching:  Find first available worker for model within consumer's `maxPrice` and `minTps` constraints. Atomically claim it, create receipt, dispatch, relay stream, settle billing.
+
+### Users & Account Management
+
+| Method | Path | Auth | Body | Returns | Purpose |
+|--------|------|------|------|---------|---------|
+| `POST` | `/users` | none | `{ name?, email? }` | `{ ok, user: {..., apiKey} }` (201) | Register new user; returns generated API key |
+| `GET` | `/users` | Bearer token | — | `{ ok, user: {...} }` | Fetch authenticated user profile |
+| `PUT` | `/users` | Bearer token | `{ name?, email? }` | `{ ok, user: {...} }` | Update user name/email |
+| `POST` | `/users/recharge` | Bearer token | `{ amount: number }` | `{ ok, user: {...} }` | Add credits to account |
+| `POST` | `/users/reset` | Bearer token | — | `{ ok, user: {...}, apiKey }` | Rotate API key |
+| `DELETE` | `/users` | Bearer token | — | `{ ok }` | Delete account |
+
+## Response & Error Envelopes
+
+### Success Response
+
+```js
+// api/helpers/response.js
+export function sendSuccess(res, { status = 200, body = {}, message } = {}) {
+  return res.status(status).json({
+    ok: true,
+    ...body,
+    ...(message && { message })
+  });
+}
+
+export function sendCreated(res, { body = {}, message } = {}) {
+  return sendSuccess(res, { status: 201, body, message });
 }
 ```
 
-### `POST /stream` Contract
-
-Request body:
+**Example:**
 ```json
-{ "message": "Hello", "model": "ai/smollm2" }
+{ "ok": true, "user": { "id": 1, "name": "Alice", "credits": 100 }, "apiKey": "abc123..." }
 ```
-(`input` is accepted as an alias for `message`)
 
-Validation errors (`400`):
-- `message` missing or not a non-empty string
-- `model` missing or not a non-empty string
+### Error Response
 
-Response: `text/event-stream` SSE with events:
-- `event: message` — each LLM output chunk (`data: <text>`)
-- `event: end` — completion signal (`data: Stream complete.`)
-- `event: error` — relay error (`data: <message>`)
-
-### Error Envelope
-
-All JSON errors use:
-```json
+```js
+// api/middleware/error.js formats all errors
 { "error": true, "status": 400, "type": "Bad Request", "message": "..." }
 ```
 
-`api/middleware/error.js` derives `type` from HTTP status names.
+All HTTP errors must be raised as `HttpError(status, message)` from `api/helpers/error.js`. The terminal error middleware converts them to the above envelope.
 
-## Key API Code Paths
+## Key Architecture Patterns
 
-| File | Responsibility |
-|---|---|
-| `api/helpers/queue.js` | `Queue` — FIFO job queue with add/requeue/shift/remove/getPosition |
-| `api/helpers/router.js` | `StreamRouter` — dispatches queued jobs to available workers; tracks active jobs; handles worker lifecycle |
-| `api/helpers/stream.js` | `HttpStream` — SSE response wrapper (event name, send, close) |
-| `api/helpers/wsserver.js` | `WSServer` — WebSocket server wrapper; parses typed messages; routes to registered handlers |
-| `api/helpers/error.js` | `HttpError`, `CustomError` — typed error classes |
-| `api/middleware/error.js` | Terminal error middleware; formats error envelope |
+### Route Factories (Dependency Injection)
 
-## Worker Shape (`worker/`)
+Routes are mounted via factory functions that accept dependencies:
 
-Base app: `worker/app.js`
+```js
+// api/routes/workers.js
+export function workersRouterFactory({ workersModel, streamRouter }) {
+  const router = express.Router();
+  router.get('/', async (req, res, next) => {
+    // route implementation
+  });
+  return router;
+}
 
-Routes:
-- `GET /ready` — returns `{ ok: true, message, timestamp, uptime }`
+// api/app.js
+app.use('/workers', workersRouterFactory({ workersModel, streamRouter }));
+```
 
-The worker does **not** expose the LLM port or accept HTTP stream requests. All work flows through the WebSocket connection to the API.
+**Why:** Enables testability (inject mocks) and decoupling of routes from globals.
 
-## Key Worker Code Paths
+### StreamRouter & Job Dispatch
 
-| File | Responsibility |
-|---|---|
-| `worker/helpers/api-client.js` | `ApiStreamClient` — persistent WebSocket connection to API; registers worker; handles stream-job messages; calls LLM; sends stream events back; reconnects with exponential backoff |
-| `worker/model/llm.js` | `LLM` — calls LLM model runner via `fetch` SSE; forwards chunks to a `SocketStream`; throws `HttpError` on failure |
-| `worker/routes/system.js` | Express router for `GET /ready` |
-| `worker/helpers/error.js` | `HttpError`, `CustomError` |
-| `worker/middleware/error.js` | Terminal error middleware |
+```js
+// api/helpers/router.js
+export class StreamRouter {
+  enqueue(job)         // add job to queue; dispatch to available worker
+  cancel(jobId)        // remove queued or active job
+  getState()           // { connectedWorkers, availableWorkers, activeJobs, queuedJobs }
+  getWorkersSnapshot() // runtime worker state with live activity
+}
+```
 
-## WebSocket Protocol (API ↔ Worker)
+- **`enqueue(job)`**: Accepts `{ payload: { message, model }, stream, targetWorkerId?, settlement?, onJobAborted? }`. Returns `jobId`. If a worker is available, dispatches immediately; otherwise queues.
+- **`cancel(jobId)`**: Removes job from queue or aborts active dispatch.
+- **Settlement**: When `settlement: { orderId, requesterId }` is provided, the router calls `ordersModel.settleCompletedJob()` after the worker signals completion.
 
-All messages are JSON: `{ "type": "<event>", "payload": { ... } }`.
+### Worker Registration & Binding
 
-Worker → API:
-- `worker-register` — `{ workerId, apiKey, hostname, pid }`
-- `worker-ready` — signals availability after completing a job
-- `stream-event` — `{ jobId, event, data }` (relays LLM output chunk)
+Workers connect via **WebSocket at `ws://api:3000/ws/workers`** (internal Docker network) and send:
+
+```json
+{
+  "type": "worker-register",
+  "payload": {
+    "workerId": "worker-001",
+    "apiKey": "<user-api-key>",
+    "model": "ai/smollm2",
+    "tps": 50,
+    "price": 0.01
+  }
+}
+```
+
+**API validation (api/models/workers.js):**
+- Lookup user by `apiKey` (encrypted at rest via `api/helpers/secure-key.js`)
+- Validate model, tps, price
+- Bind worker immutably to user: `INSERT INTO workers (id, user_id, model, tps, price) VALUES (...) ON DUPLICATE UPDATE ...`
+- Concurrency safe: re-read ownership after upsert; reject if user mismatch
+
+### SSE Stream Relay
+
+```js
+// api/helpers/stream.js
+export class HttpStream {
+  event(name)    // set next event name (default "message")
+  send(data)     // write SSE line: "event: <name>\ndata: <data>\n\n"
+  close()        // end response
+}
+```
+
+Example sequence for `/tasks/run`:
+1. Enqueue job with new `HttpStream(res)`
+2. Worker sends `stream-event` → API parses, calls `stream.event('message').send(chunk)`
+3. Worker sends `[DONE]` → `stream.event('end').send('complete')`
+4. `stream.close()` ends the response
+
+### Models Own Business Logic
+
+```js
+// api/models/users.js
+export class UsersModel {
+  register(payload)           // create user + generate API key
+  getByApiKey(apiKey)        // lookup + verify
+  rechargeById(userId, amount)
+  resetApiKeyById(userId)    // rotate key
+}
+
+// api/models/workers.js
+export class WorkersModel {
+  bindConnectedWorker(input)              // register WebSocket worker
+  listPoolByOwner(userId, runtimeState)   // owner's workers
+  listPublic()                            // public pool
+  findFirstAvailableByModel(model, constraints, streamRouter)
+  markBusy(workerId)                      // claim for dispatch
+  markDisconnected(workerId)              // handle socket close
+}
+
+// api/models/orders.js
+export class OrdersModel {
+  createReceipt(requesterId, { workerId, model, price })  // on dispatch
+  settleCompletedJob(input)  // billing: debit requester, credit provider (minus fee)
+  failReceipt(orderId)       // mark failed
+}
+```
+
+Models use `Mysql` helper (api/helpers/mysql.js) for all database access. No raw SQL outside models.
+
+### WebSocket Message Protocol (API ↔ Worker)
+
+All messages: `{ "type": "...", "payload": {...} }`
+
+**Worker → API:**
+- `worker-register` — initial registration (see above)
+- `worker-ready` — signals availability after job completion
+- `stream-event` — `{ jobId, event, data }` — relay LLM output chunk
+- `job-complete` — `{ jobId, usage: {...} }` — job finished successfully
+- `job-failed` — `{ jobId, error: "..." }` — job failed
+
+**API → Worker:**
+- `stream-job` — `{ jobId, payload: { message, model } }` — dispatch task
+- `cancel-job` — `{ jobId }` — abort task
+
+## Database Schema Essentials
+
+```sql
+-- api/schema.sql (loaded at startup)
+CREATE TABLE users (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  name VARCHAR(255),
+  email VARCHAR(255),
+  credits DECIMAL(18, 8),
+  api_key_digest VARCHAR(64),     -- indexed lookup
+  api_key_cipher VARCHAR(255),    -- encrypted AES-256-GCM
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE workers (
+  id VARCHAR(255) PRIMARY KEY,
+  user_id BIGINT,                 -- immutable binding
+  model VARCHAR(255),
+  tps INT,
+  price DECIMAL(18, 8),
+  status ENUM('connected', 'disconnected'),
+  connected_at TIMESTAMP,
+  disconnected_at TIMESTAMP,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE orders (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  requester_id BIGINT,
+  worker_id VARCHAR(255),
+  model VARCHAR(255),
+  price DECIMAL(18, 8),
+  status ENUM('running', 'completed', 'failed'),
+  started_at TIMESTAMP,
+  completed_at TIMESTAMP,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+## Security Patterns
+
+- **API Key Encryption**: Stored as AES-256-GCM ciphertext; indexed via HMAC digest for O(1) lookup without decryption.
+- **Bearer Token Auth**: `Authorization: Bearer <api-key>` parsed by `api/helpers/auth.js`.
+- **Worker Immutability**: Once a worker is bound to a user, the binding cannot change. Prevents hijacking.
+- **No Self-Orders**: Validation prevents a consumer from purchasing work from their own workers (conflict of interest).
+- **Atomicity**: Worker claim (`markBusy`) and receipt creation are separate but ordered; concurrent consumers race fairly.
+
+## When to Use StreamRouter vs Direct Handlers
+
+- **Use StreamRouter** (`enqueue()`, `cancel()`) when the job requires live worker dispatch and SSE relay.
+- **Use direct handlers** (inline middleware) for stateless validation-only endpoints.
+
+## Common Pitfalls
+
+1. **Forgetting to pass `streamRouter`** to route factories → routes can't dispatch jobs.
+2. **Mutating model objects** after query → causes stale data in re-dispatches; reassign instead.
+3. **Not catching `HttpError`** in route handlers → uncaught errors bypass error middleware.
+4. **Raw SQL outside models** → violates architecture; always use Mysql helper.
 - `job-complete` — `{ jobId }`
 - `job-failed` — `{ jobId, error }`
 
