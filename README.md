@@ -1,6 +1,6 @@
 # LocalLMarket
 
-**🤝 Peer-to-peer LLM compute marketplace. Anyone can contribute GPU power and earn. Anyone can access affordable AI.**
+**🤝 Decentralized LLM compute marketplace. Anyone can contribute GPU power and earn. Anyone can access affordable AI.**
 
 ---
 
@@ -12,7 +12,7 @@ Why should all that compute go unused? Why should consumers pay centralized pric
 
 ## 🎯 The Solution
 
-**LocalLMarket** is a peer-to-peer marketplace where:
+**LocalLMarket** is a decentralized marketplace where:
 
 - **Workers** (anyone with a GPU) register a model, set their own price, and earn credits per completed request.
 - **Consumers** find the best-priced worker meeting their needs and call the model via a simple API.
@@ -474,5 +474,5 @@ LocalLMarket is released under the **MIT License**. See [LICENSE](LICENSE) for d
 
 ---
 
-**Ready to join the peer-to-peer compute revolution? Start as a worker, consumer, or developer today.** 🚀
+**Ready to join the decentralized compute marketplace? Start as a worker, consumer, or developer.** 🚀
 
